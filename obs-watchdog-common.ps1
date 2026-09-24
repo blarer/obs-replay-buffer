@@ -32,10 +32,30 @@ function Get-BootId { [string](Get-WmiObject Win32_OperatingSystem).LastBootUpTi
 
 function Test-ObsRunning { [bool](Get-Process obs64 -ErrorAction SilentlyContinue) }
 
+# OBS 32 marks a running instance with a file in .sentinel and deletes it on a
+# clean exit. A leftover file (crash, force-kill, power loss, forced update
+# restart) makes the next start stop at a modal "Crash Detected / Run in Safe
+# Mode?" dialog, BEFORE anything loads: no replay buffer, no Lua. The old
+# --disable-shutdown-check flag that skipped this was removed in OBS 32. So
+# clear stale markers before each launch. Only called when no OBS is running,
+# so a live instance's marker is never touched. The crash log itself stays in
+# obs-studio\crashes.
+$SentinelDir = if ($env:OBS_WATCHDOG_SENTINELDIR) { $env:OBS_WATCHDOG_SENTINELDIR } `
+               else { Join-Path $env:APPDATA 'obs-studio\.sentinel' }
+
+function Clear-ObsCrashFlag {
+    if (-not (Test-Path $SentinelDir)) { return 0 }
+    $stale = @(Get-ChildItem $SentinelDir -File -Filter 'run_*' -ErrorAction SilentlyContinue)
+    foreach ($f in $stale) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue }
+    $stale.Count
+}
+
 function Start-Obs {
     if (Test-ObsRunning) { return }   # never start a second instance
+    $n = Clear-ObsCrashFlag
+    if ($n) { Write-Log 'launch' "OBS last exited uncleanly: cleared $n crash marker(s) so it starts without the Safe Mode prompt" }
     Start-Process -FilePath $ObsExe -WorkingDirectory $ObsDir `
-        -ArgumentList '--startreplaybuffer', '--minimize-to-tray', '--disable-shutdown-check'
+        -ArgumentList '--startreplaybuffer', '--minimize-to-tray'
 }
 
 function Show-Toast {

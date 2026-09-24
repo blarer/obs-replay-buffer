@@ -101,6 +101,20 @@ Save-State (S)
 Check 'atomic save leaves no temp file'              (Test-Path "$StateFile.tmp") $false
 Check 'saved file round-trips'                       (Read-State).lastSeenBoot $BOOT
 
+'--- crash marker cleanup (Safe Mode prompt) ---'
+$sd = Join-Path $tmp 'sentinel'
+New-Item -ItemType Directory $sd | Out-Null
+$SentinelDir = $sd
+'x' | Set-Content (Join-Path $sd 'run_aaaa')
+'x' | Set-Content (Join-Path $sd 'run_bbbb')
+'x' | Set-Content (Join-Path $sd 'keep_me.txt')
+Check 'clears both stale run_* markers'              (Clear-ObsCrashFlag) 2
+Check 'no run_* markers left'                        @(Get-ChildItem $sd -Filter 'run_*').Count 0
+Check 'unrelated files untouched'                    (Test-Path (Join-Path $sd 'keep_me.txt')) $true
+Check 'nothing to clear -> 0'                        (Clear-ObsCrashFlag) 0
+$SentinelDir = Join-Path $tmp 'does-not-exist'
+Check 'missing sentinel dir -> 0, no error'          (Clear-ObsCrashFlag) 0
+
 '--- quiet runs write nothing ---'
 Remove-Item $LogFile -ErrorAction SilentlyContinue
 $script:obsUp = $true; Save-State (S)
