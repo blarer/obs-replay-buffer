@@ -27,12 +27,18 @@ If testDir <> "%OBS_WATCHDOG_STATEDIR%" And testDir <> "" Then
 End If
 
 ' Never call CanSkip inside an If: see the trap described below.
-Dim skip
+' Exit codes 10/20 exist only for test-gate.ps1. Normal runs always exit 0,
+' so Task Scheduler's "Last Run Result" stays 0x0 (success).
+Dim skip, testing
+testing = (testDir <> "%OBS_WATCHDOG_STATEDIR%" And testDir <> "")
 skip = False
 skip = CanSkip()
 If Err.Number <> 0 Then skip = False
-If skip = True Then WScript.Quit 10
-If testDir <> "%OBS_WATCHDOG_STATEDIR%" And testDir <> "" Then WScript.Quit 20
+If testing Then
+    If skip = True Then WScript.Quit 10
+    WScript.Quit 20
+End If
+If skip = True Then WScript.Quit 0
 RunWatchdog
 WScript.Quit 0
 
