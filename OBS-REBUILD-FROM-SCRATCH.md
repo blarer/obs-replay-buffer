@@ -78,7 +78,7 @@ Settings -> Output -> Output Mode **Advanced**:
 
 **Audio tab**: Track 1 and Track 2 at **320 kbps** AAC (FFmpeg AAC).
 
-**Replay Buffer tab**: enable it, Maximum Replay Time **600 s** (10 min), Maximum Memory **4096 MB**. Whichever limit hits first wins, so at high-motion AV1 CQP 20 the buffer may be a bit shorter than 10 min. Filename prefix `rb`.
+**Replay Buffer tab**: enable it, Maximum Replay Time **600 s** (10 min), Maximum Memory **4096 MB**. Whichever limit hits first wins. Measured: a full Fortnite buffer is 600 s at ~3 GB (~42 Mbps), so the time limit is what binds and 4 GB is just headroom. Filename prefix `rb`.
 
 Settings -> Output also: Filename formatting `%b %d %I.%M %p` gives names like `rb Sep 23 10.08 PM.mp4`.
 
@@ -188,7 +188,7 @@ Evidence from the original machine (OBS log, 2026-09-24, 1.5 hours of buffer whi
 | **Hybrid MP4** | Crash-safe without a remux step afterwards. |
 | **OBS not run as admin** | Its log says `D3D11 GPU priority setup failed (not admin?)`. That is **intentional**. As admin, OBS raises its own GPU priority and can take frame time from the game. For a background clipper the game must win. |
 | **Process priority Normal** | Same reason. Do not raise it. |
-| **Lua sampler at 1 Hz, cached per window** | Costs ~0.008 microseconds per sample in steady state (measured). It runs on the script thread, never the render or encode path. |
+| **Lua sampler at 1 Hz, cached per window** | Costs ~0.008 microseconds per sample in steady state (measured). Note: OBS runs Lua timers on its video tick (render thread), so this is not "free by design", it is free because it is tiny: worst case ~33 us vs a 16,667 us frame. |
 | **Watchdog every 1 min, then exits** | Nothing resident. Each run is a few ms of PowerShell, only if not already running (`IgnoreNew`). |
 
 **Trade-off to know:** keeping the buffer running 24/7 keeps one NVENC session and ~4 GB of RAM busy all the time. A Sep 2026 Fortnite tuning pass listed it as the top thing to A/B test for 1% lows. The user chose to **keep it** because clipping matters more. To A/B test: `Disable-ScheduledTask 'OBS Replay Buffer Watchdog'`, close OBS, play, compare, then `Enable-ScheduledTask`.
@@ -472,8 +472,9 @@ try {
 -- The scoring half is pure and exported as OBS_CLIP_SORT for the test harness
 -- (Scripts\test-obs-sort.lua), which runs under plain Lua with no OBS present.
 --
--- Cost: the sampler runs on OBS's script thread, never the render or encode
--- path, so it cannot drop frames. Measured on this machine, a full probe is
+-- Cost: obs timers run inside OBS's video tick (obs_add_tick_callback, the
+-- render thread), so the sampler must stay tiny. It does, far under a 16.7 ms
+-- frame even in the worst case. Measured on this machine, a full probe is
 -- ~33 us, but the result is cached per HWND, so a sample while the foreground
 -- window is unchanged (the overwhelmingly common case while gaming) is
 -- ~0.008 us. At 1 Hz that is ~0.000001% of one core. History is run-length

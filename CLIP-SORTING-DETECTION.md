@@ -63,7 +63,7 @@ Step 3 exists because right after OBS starts or the script reloads, the history 
 ### Why it's cheap (you asked for minimum resource use)
 
 Measured on your machine with `bench-focus-probe.cs` and the Lua timing tests:
-- It runs on OBS's **script thread**. That is not the render or encode path, so it can't cause dropped frames.
+- It runs inside OBS's **video tick** (Lua `timer_add` callbacks are called from `obs_add_tick_callback`, which is the render thread). So it *could* cost frames if it were slow. It isn't: worst case ~33 us, steady state ~0.008 us, against a 16,667 us frame at 60 fps.
 - Full probe (window → PID → exe path) ≈ **33 µs**. That lookup is **cached per window handle**, so while you stay in one game each sample is one `GetForegroundWindow` call, a pointer compare, and the ~0.05 µs rectangle check.
 - History is **run-length encoded**: one entry per continuous stretch of focus, with a new entry only after an alt-tab or a gap of more than 5 s. An hour in one game is **one table entry**. History older than 1 h is discarded.
 - The ffi buffers are allocated once, so sampling never allocates memory.

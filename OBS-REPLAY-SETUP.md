@@ -102,7 +102,7 @@ Folder choice is not a single snapshot of the foreground window. A **1 Hz sample
 
 Consequences: start on desktop then launch a game -> game folder. Alt-tab to Discord then hit save -> still the game folder.
 
-**Cost.** Runs on OBS's script thread, never render or encode, so it cannot drop frames. Full probe ~33 us, but the PID->exe lookup is cached per HWND, so a steady-state sample is ~0.008 us. At 1 Hz that is ~0.000001% of one core. Buffers are preallocated so sampling never allocates.
+**Cost.** Runs inside OBS's video tick (Lua timers are driven by `obs_add_tick_callback`, the render thread), so it must stay tiny, and it does. Full probe ~33 us, but the PID->exe lookup is cached per HWND, so a steady-state sample is ~0.008 us. At 1 Hz that is ~0.000001% of one core. Buffers are preallocated so sampling never allocates.
 
 The scoring half is pure and exported as `OBS_CLIP_SORT` for the offline test harness.
 

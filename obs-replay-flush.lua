@@ -14,8 +14,9 @@
 -- The scoring half is pure and exported as OBS_CLIP_SORT for the test harness
 -- (Scripts\test-obs-sort.lua), which runs under plain Lua with no OBS present.
 --
--- Cost: the sampler runs on OBS's script thread, never the render or encode
--- path, so it cannot drop frames. Measured on this machine, a full probe is
+-- Cost: obs timers run inside OBS's video tick (obs_add_tick_callback, the
+-- render thread), so the sampler must stay tiny. It does, far under a 16.7 ms
+-- frame even in the worst case. Measured on this machine, a full probe is
 -- ~33 us, but the result is cached per HWND, so a sample while the foreground
 -- window is unchanged (the overwhelmingly common case while gaming) is
 -- ~0.008 us. At 1 Hz that is ~0.000001% of one core. History is run-length
