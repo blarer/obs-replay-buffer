@@ -1,5 +1,7 @@
 # OBS Always-On Replay Buffer + Auto Clip Sorting
 
+> **SUPERSEDED 2026-09-24.** Parts of this file describe the OLD design (websocket buffer check, `run-hidden.vbs` as the task action, `--disable-shutdown-check`). The current, tested setup is in **OBS-REBUILD-FROM-SCRATCH.md** (flow chart: `OBS-flow.png` / `OBS-flow.mmd`). Kept for history only.
+
 Reconstructed spec of the setup originally built **2026-07-04** (that conversation is gone: it predates jcode, whose history starts 2026-07-26, and the Claude Code transcript was purged). Everything below was read directly off this machine on 2026-09-24.
 
 Goal: the replay buffer is **always running** so a clip is never missed, and saved clips auto-file into `Videos\<game>\`.

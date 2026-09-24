@@ -1,74 +1,79 @@
 # Rebuild Guide: Always-On OBS Replay Buffer, Close Notification, Clip Sorting
 
-Written 2026-09-24 for an AI (or human) with **no memory** of the original work. Follow it top to bottom on a fresh Windows 11 PC and you get the exact same setup. Every value here was read off the working machine, not guessed. The full source of every script is in the **Appendix** at the bottom, so this file alone is enough even if `C:\Users\blare\Scripts` is gone.
+Written 2026-09-24 for an AI (or human) with **no memory** of the original work. Follow it top to bottom on a fresh Windows 11 PC and you get the exact same setup. Every value was read off the working machine, not guessed. The full source of every file is in the **Appendix**, so this file alone is enough even if `C:\Users\blare\Scripts` is gone.
+
+A picture of the whole flow: `OBS-flow.png` (source `OBS-flow.mmd`, render command in section 6).
 
 ---
 
 ## 0. What the finished system does
 
-1. You log in. About 30 seconds later OBS starts **silently in the system tray** with the **replay buffer already running**. No window, no prompt.
-2. The replay buffer always holds the last 10 minutes of gameplay in RAM. Press **Alt+Z** to save it.
-3. The saved clip is automatically moved into a per-game folder, e.g. `Videos\FortniteClient-Win64-Shipping\`. The folder is picked by which app **had focus for most of the clip**, not just whatever was on top when you pressed save.
-4. After every save, the buffer is flushed so the next clip never repeats footage from the last one.
-5. If you close OBS, a Windows notification pops up: **"OBS closed - replay buffer is OFF"** with two buttons:
-   - **Relaunch now** starts OBS right away.
-   - **Stay off 5 min** leaves it off for 5 minutes, then asks again.
-   - **Ignore it**: after 5 minutes OBS restarts by itself. You can never *forget* to turn recording back on.
-6. If OBS is running but the replay buffer got stopped somehow, it is silently turned back on within 1 minute.
+1. You log in. About 30 s later OBS starts **silently in the tray** with the **replay buffer running**. No window, no prompt.
+2. The buffer holds the last 10 minutes in RAM. **Alt+Z** saves it.
+3. The clip is moved into a per-game folder, e.g. `Videos\FortniteClient-Win64-Shipping\`, chosen by which app **had focus for most of the clip** (not whatever is on top at save time). Name clashes get ` (2)`, ` (3)`.
+4. After every save the buffer restarts once, so the next clip never repeats footage.
+5. If the buffer is ever off while OBS is open, it is turned back on within ~1 s (measured 1.3 s).
+6. If you close OBS (or it crashes), within 1 minute a notification appears: **"OBS closed - replay buffer is OFF"**:
+   - **Relaunch now**: starts OBS right away.
+   - **Stay off 5 min**: quiet for 5 minutes, then the notification comes back.
+   - **X / ignore**: after 5 minutes OBS restarts by itself. Recording can never be forgotten.
+7. Relaunches after a crash start straight into normal mode (no "Run in Safe Mode?" popup).
 
 ## 1. How it fits together
 
 ```
-Task Scheduler "OBS Replay Buffer Watchdog"   (at logon + every 1 minute)
-   -> wscript run-hidden.vbs            (runs PowerShell with no window flash)
-      -> obs-replay-watchdog.ps1
-           OBS not running? -> first time this boot: launch silently
-                            -> otherwise: toast + 5 min grace -> relaunch
-           OBS running?     -> obs-websocket (port 4455): replay buffer on? if not, start it
-                                   |
-Toast buttons -> obs-watchdog:relaunch / obs-watchdog:snooze   (custom URL protocol)
-   -> wscript run-hidden.vbs -> obs-watchdog-action.ps1  (updates state json)
-
-obs-watchdog-state.json   shared memory between the two scripts
-
-Inside OBS: obs-replay-flush.lua   (flush after save + sort clips into game folders)
+Task Scheduler "OBS Replay Buffer Watchdog"  (at logon +30 s, then every 1 min)
+  -> wscript obs-watchdog-gate.vbs                   ~30 ms CPU
+       OBS running AND state says nothing pending?  -> exit   (almost every minute)
+       otherwise (or any error)                     -> powershell obs-replay-watchdog.ps1  (~280 ms)
+            OBS off, new boot          -> launch silently
+            OBS off, just closed       -> save 5 min timer, THEN show toast
+            OBS off, timer expired     -> relaunch
+            OBS off, snoozed           -> wait
+            OBS on                     -> tidy state, remove stale toast
+Toast buttons -> obs-watchdog: URL (HKCU) -> run-hidden.vbs -> obs-watchdog-action.ps1
+Every launch  -> delete stale OBS crash markers -> obs64 --startreplaybuffer --minimize-to-tray
+Inside OBS    -> obs-replay-flush.lua, 1 Hz: focus history + keep the buffer on
+                 on save: sort into Videos\<exe>\, restart buffer once
+obs-watchdog-common.ps1   all shared logic (both .ps1 files dot-source it)
+obs-watchdog-state.json   lastSeenBoot / graceUntil / snoozeUntil
+obs-watchdog.log          one line per real action, nothing on quiet runs, rotates at 256 KB
 ```
 
-Why these design choices:
-- **Task Scheduler every minute**, not a background PowerShell loop. Nothing stays resident, and the task restarts itself after crashes, sleep, and reboots.
-- **run-hidden.vbs**: launching `powershell.exe` from a task flashes a console window every minute, even with `-WindowStyle Hidden`. `wscript` with `Run cmd, 0` gives true zero-flash.
-- **State file with the boot time**: this is how the script tells "PC just booted" (launch silently) apart from "user closed OBS" (ask first).
-- **Protocol URLs for the toast buttons**: toasts shown from PowerShell cannot run code directly. A button can only open a URL. Registering `obs-watchdog:` as a URL scheme turns a click into a script call.
-- **Grace-then-relaunch**: the core rule is *never lose a clip to an unanswered prompt*, while still letting the user turn OBS off on purpose.
+Why it is built this way:
+- **Task Scheduler every minute**, not a resident loop: nothing stays in memory, and it survives crashes, sleep and reboots.
+- **The VBS gate**: starting PowerShell costs ~280 ms CPU (measured). In steady state there is nothing to do, so a ~30 ms VBScript check answers "OBS running and nothing pending?" and exits. It **fails open**: any doubt or error runs the full watchdog, so it can only save work, never skip it.
+- **wscript, not powershell, as the task action**: a task that starts powershell.exe flashes a console window every minute even with `-WindowStyle Hidden`.
+- **Boot time in the state file** tells "PC just booted" (launch silently) apart from "user closed OBS" (ask first). It is stored as the raw WMI string (e.g. `20260924085141.500000-240`) so VBScript and PowerShell compare it identically.
+- **Protocol URL for the toast buttons**: a toast shown from PowerShell can't run code. A button can only open a URL, so `obs-watchdog:` is registered to call a script.
+- **The keep-alive lives inside OBS (Lua)**, not outside via obs-websocket. It is faster (1 s vs 1 min), needs no password, and the websocket server can stay off.
+- **Core rule**: never lose a clip to an unanswered prompt, but always allow turning OBS off on purpose.
 
 ---
 
 ## 2. Step by step build
 
-User account on the original machine: `blare`. Replace it if different. Scripts live in `C:\Users\<user>\Scripts\`.
+User on the original machine: `blare`. Scripts live in `C:\Users\<user>\Scripts\`.
 
 ### Step 1. Install OBS
+OBS Studio 32.x (original: 32.2.0) at `C:\Program Files\obs-studio\`. Run it once normally so `%APPDATA%\obs-studio\` exists. Do **not** set it to run as administrator (section 3).
 
-Install OBS Studio 32.x (the original runs 32.2.0) to the default path `C:\Program Files\obs-studio\`. Run it once normally so it creates `%APPDATA%\obs-studio\`. Do **not** set it to run as administrator (see section 3).
+### Step 2. Profile `GameRec-AV1`
+Profile -> New -> `GameRec-AV1`. OBS stores it in `%APPDATA%\obs-studio\basic\profiles\GameRecAV1\` (hyphen dropped, normal).
 
-### Step 2. Create the OBS profile
+Settings -> Output -> Output Mode **Advanced**, Recording tab:
 
-OBS: Profile -> New -> name it `GameRec-AV1`. OBS will store it in `%APPDATA%\obs-studio\basic\profiles\GameRecAV1\` (the hyphen is dropped in the folder name. That is normal).
-
-Settings -> Output -> Output Mode **Advanced**:
-
-**Recording tab**
 | Setting | Value |
 |---|---|
 | Type | Standard |
 | Recording Path | `C:\Users\<user>\Videos` |
-| Recording Format | **Hybrid MP4** (`hybrid_mp4`). Survives crashes like MKV but plays everywhere like MP4. |
-| Audio Track | 1 and 2 (bitmask 3) |
+| Recording Format | **Hybrid MP4** (crash-safe like MKV, plays everywhere like MP4) |
+| Audio Track | 1 and 2 |
 | Video Encoder | **NVIDIA NVENC AV1** (`obs_nvenc_av1_tex`) |
 | Rescale Output | off |
 | Rate Control | **CQP**, CQ Level **20** |
 | Keyframe Interval | 2 s |
-| Preset | **P7** (slowest / best quality) |
+| Preset | **P7** |
 | Tuning | High Quality |
 | Multipass | Disabled |
 | Profile | main |
@@ -76,59 +81,32 @@ Settings -> Output -> Output Mode **Advanced**:
 | Adaptive Quantization | on |
 | B-frames | 2 |
 
-**Audio tab**: Track 1 and Track 2 at **320 kbps** AAC (FFmpeg AAC).
-
-**Replay Buffer tab**: enable it, Maximum Replay Time **600 s** (10 min), Maximum Memory **4096 MB**. Whichever limit hits first wins. Measured: a full Fortnite buffer is 600 s at ~3 GB (~42 Mbps), so the time limit is what binds and 4 GB is just headroom. Filename prefix `rb`.
-
-Settings -> Output also: Filename formatting `%b %d %I.%M %p` gives names like `rb Sep 23 10.08 PM.mp4`.
-
-Settings -> Video: Base and Output **2560x1440**, **60 FPS**, downscale filter Lanczos (unused since no scaling).
-Settings -> Advanced: Color format NV12, color space 709, range Partial. Renderer Direct3D 11.
-Settings -> Audio: 48 kHz, Stereo. Disable audio ducking (`DisableAudioDucking=true`).
-Settings -> Hotkeys: **Replay Buffer -> Save Replay = Alt+Z**. Set "Hotkey focus behavior" to **Never disable hotkeys** so Alt+Z works while the game is focused.
-Settings -> General: enable system tray. Leave "Show confirmation dialog on exit" as you like.
+Audio tab: Track 1 and 2 at **320 kbps** (FFmpeg AAC).
+Replay Buffer tab: enabled, Max time **600 s**, Max memory **4096 MB**, prefix `rb`. Measured: a full Fortnite buffer is 600 s at ~3 GB (~42 Mbps), so the time limit binds and 4 GB is headroom.
+Filename formatting: `%b %d %I.%M %p` (e.g. `rb Sep 23 10.08 PM.mp4`). Same-minute clashes are handled by the Lua ` (2)` suffix.
+Video: base and output **2560x1440**, **60 FPS**. Advanced: NV12, 709, Partial, Direct3D 11. Audio: 48 kHz stereo, audio ducking disabled.
+Hotkeys: **Replay Buffer -> Save Replay = Alt+Z**, Hotkey focus behavior **Never disable hotkeys**.
+General: system tray enabled.
 
 ### Step 3. Sources (scene collection "Untitled")
+One scene with **Game Capture** (`game_capture`), mode "Capture specific window", window `Fortnite :UnrealWindow:FortniteClient-Win64-Shipping.exe`. Not Display Capture (it duplicates the whole desktop). Audio: Desktop Audio (+2) and Mic/Aux (+2) on your devices.
 
-One scene named `Scene` containing one source:
-- **Game Capture** (`game_capture`), mode "Capture specific window", window `Fortnite :UnrealWindow:FortniteClient-Win64-Shipping.exe`. Game Capture hooks the game's own frames. Display Capture duplicates the whole desktop and costs more, so do not use it.
+### Step 4. obs-websocket: not needed
+Nothing in this setup uses it. Leave it off (Tools -> WebSocket Server Settings -> uncheck Enable), unless some other tool of yours needs it.
 
-Audio: Desktop Audio + Desktop Audio 2 (both WASAPI output) and Mic/Aux + Mic/Aux 2 (WASAPI input) on the devices you use.
-
-### Step 4. Enable obs-websocket
-
-OBS -> Tools -> WebSocket Server Settings:
-- Enable WebSocket server: **on**
-- Port: **4455**
-- Enable Authentication: **on**, generate a password.
-
-The watchdog reads the password straight from `%APPDATA%\obs-studio\plugin_config\obs-websocket\config.json` (`server_password`). **Never copy the password into the script or any doc.**
-
-### Step 5. Put the scripts in place
-
-Create `C:\Users\<user>\Scripts\` and write these files exactly as in the Appendix:
-- `run-hidden.vbs`
-- `obs-replay-watchdog.ps1`
-- `obs-watchdog-action.ps1`
+### Step 5. Scripts
+Write these into `C:\Users\<user>\Scripts\` exactly as in the Appendix:
+- `obs-watchdog-common.ps1`, `obs-replay-watchdog.ps1`, `obs-watchdog-action.ps1`
+- `obs-watchdog-gate.vbs`, `run-hidden.vbs`
 - `obs-replay-flush.lua`
-- optional tests: `test-obs-sort.lua`, `test-obs-win32.lua`, `test-obs-collision.lua`
+- tests: `test-watchdog.ps1`, `test-gate.ps1`, `test-obs-sort.lua`, `test-obs-win32.lua`, `test-obs-collision.lua`, `test-obs-keepalive.lua`
 
-`obs-watchdog-state.json` is created automatically. Do not create it by hand.
+Keep `.ps1` files plain ASCII (PowerShell 5.1 misreads UTF-8 without BOM). `obs-watchdog-state.json` and `obs-watchdog.log` are created automatically. If the OBS path differs, change `$ObsExe` in `obs-watchdog-common.ps1`.
 
-If the username or OBS path differs, fix the paths at the top of the two `.ps1` files.
+### Step 6. Load the Lua script
+OBS -> Tools -> Scripts -> `+` -> `obs-replay-flush.lua`. Script Log shows `replay-flush + smart game-sort loaded`. After edits press the reload button, no OBS restart needed.
 
-### Step 6. Load the Lua script into OBS
-
-OBS -> Tools -> Scripts -> `+` -> pick `obs-replay-flush.lua`. The Script Log should show:
-```
-replay-flush + smart game-sort loaded
-```
-After editing the script later, press the reload (circular arrows) button. No OBS restart needed.
-
-### Step 7. Register the `obs-watchdog:` protocol (per user, no admin)
-
-Register it under **HKCU**, not HKLM:
-
+### Step 7. Register the `obs-watchdog:` protocol (per user, HKCU, no admin)
 ```powershell
 $u = "C:\Users\$env:USERNAME\Scripts"
 $k = 'HKCU:\Software\Classes\obs-watchdog'
@@ -138,14 +116,11 @@ Set-ItemProperty $k 'URL Protocol' ''
 Set-ItemProperty "$k\shell\open\command" '(default)' "wscript.exe `"$u\run-hidden.vbs`" `"$u\obs-watchdog-action.ps1`" `"%1`""
 ```
 
-### Step 8. Create the scheduled task
-
-Must run as the **logged-in user with an interactive token**, **not** "highest privileges" and **not** SYSTEM. Otherwise the toast is invisible and OBS starts in the wrong session.
-
+### Step 8. Scheduled task
+Must run as the **logged-in user, interactive, not "highest privileges", not SYSTEM**, or the toast is invisible and OBS starts in the wrong session.
 ```powershell
 $u   = "C:\Users\$env:USERNAME\Scripts"
-$act = New-ScheduledTaskAction -Execute 'wscript.exe' `
-         -Argument "`"$u\run-hidden.vbs`" `"$u\obs-replay-watchdog.ps1`""
+$act = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$u\obs-watchdog-gate.vbs`""
 $t1  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $t1.Delay = 'PT30S'
 $t2  = New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
@@ -155,106 +130,154 @@ $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnB
 $pr  = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask 'OBS Replay Buffer Watchdog' -Action $act -Trigger $t1,$t2 -Settings $set -Principal $pr
 ```
+Or import `obs-watchdog-task.xml` (fix the user inside first on a new PC).
 
-Alternatively import the exported definition: `schtasks /create /tn "OBS Replay Buffer Watchdog" /xml obs-watchdog-task.xml` (fix the user SID/name inside first on a new PC).
+### Step 9. Verify
+Automated (no OBS changes, temp folders only):
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File test-watchdog.ps1   -> 42 passed
+powershell -NoProfile -ExecutionPolicy Bypass -File test-gate.ps1       -> 13 passed (needs OBS open)
+lua test-obs-sort.lua                                                   -> 19 passed
+luajit test-obs-win32.lua                                               -> 7 passed
+luajit test-obs-collision.lua                                           -> 4 passed
+lua test-obs-keepalive.lua                                              -> 21 passed
+```
+(`scoop install lua luajit` for the Lua runners.)
 
-### Step 9. Verify (do all of these)
-
-1. `Start-ScheduledTask 'OBS Replay Buffer Watchdog'` with OBS closed and a **fresh boot** -> OBS appears in the tray, replay buffer active, no prompt.
-2. `Get-ScheduledTaskInfo 'OBS Replay Buffer Watchdog'` -> `LastTaskResult 0`.
-3. Press Alt+Z in a game -> clip lands in `Videos\<GameExe>\`. OBS Script Log prints `sorted -> <folder>\<file>`.
-4. Close OBS -> within 1 minute a toast appears. Click **Stay off 5 min** -> `obs-watchdog-state.json` shows `snoozeUntil` about 5 min ahead. (Confirmed working on the original machine 2026-09-24 10:32.)
-5. Close OBS and ignore the toast -> about 5-6 minutes later OBS relaunches on its own.
-6. Stop the replay buffer manually inside OBS -> within 1 minute it is running again.
-7. `lua test-obs-sort.lua` -> `19 passed, 0 failed`. `luajit test-obs-win32.lua` -> `7 passed, 0 failed`. `luajit test-obs-collision.lua` -> `4 passed, 0 failed` (same-name saves get ` (2)`, ` (3)` instead of being stranded). (Install with `scoop install lua luajit`.)
+Live, all done on the original machine 2026-09-24, each visible in `obs-watchdog.log` or the OBS log:
+1. Kill OBS -> toast within 1 min (12:17:02) -> X -> relaunched exactly 5 min later (12:22:02).
+2. Kill OBS again -> relaunch logs `cleared 2 crash marker(s)` -> OBS starts in normal mode, no Safe Mode popup, Lua loaded, buffer started.
+3. Stop the buffer while OBS runs -> Lua `keep-alive: replay buffer was off, starting it` -> running again after 1.3 s.
+4. Save -> `sorted -> <folder>\<file>` -> buffer Stop/Start exactly once, no keep-alive interference.
+5. Steady state: gate ~31 ms CPU and no PowerShell started.
 
 ---
 
-## 3. Settings chosen for the cleanest resource use (and why)
+## 3. Settings for the cleanest resource use (and why)
 
-Evidence from the original machine (OBS log, 2026-09-24, 1.5 hours of buffer while gaming): **32 of 334,977 frames skipped due to encoding lag (0.0%)**, **32 lagged due to rendering (0.0%)**, GPU encoder median 0.088 ms per frame. So this configuration is effectively free on this hardware (RTX 5090-class GPU, AMD X3D CPU, 2560x1440 at ~480 Hz OLED).
+Evidence (OBS log, 1.5 h of buffer while gaming): **32 of 334,977 frames skipped for encoding lag (0.0%)**, 32 for rendering lag (0.0%), GPU encode median 0.088 ms. Hardware: RTX 5090-class GPU, AMD X3D CPU, 1440p ~480 Hz OLED, 63.6 GB RAM.
 
-| Choice | Why it is the low-cost option |
+| Choice | Why |
 |---|---|
-| **NVENC (hardware) encoder** | Runs on the GPU's dedicated video engine, not CUDA cores or the CPU. x264 would eat CPU cores the game wants. |
-| **AV1** | Smallest files at the same quality, so the 4 GB RAM buffer holds more minutes. Needs RTX 40-series or newer. On older cards use NVENC HEVC. |
-| **CQP 20** | Constant quality, no bitrate juggling. Good for local clips (not for streaming). |
-| **Preset P7** | Slowest NVENC preset, but it runs on the separate encoder block, so frame cost stayed 0.0% here. If you ever see "skipped frames due to encoding lag", drop to **P5** first. |
-| **Look-ahead off, multipass disabled** | Both add GPU work and latency for little gain at CQP. |
-| **No rescale (native 1440p)** | Scaling costs GPU render time. Encoding at native resolution avoids it. |
-| **60 FPS** | Recording at the game's ~480 fps would multiply encoder work. 60 is plenty for clips. |
-| **Game Capture, not Display Capture** | Hooks only the game's frames instead of duplicating the entire desktop. |
-| **Replay buffer in RAM (4096 MB cap)** | No constant disk writes. Disk is only touched when you press save. |
-| **Hybrid MP4** | Crash-safe without a remux step afterwards. |
-| **OBS not run as admin** | Its log says `D3D11 GPU priority setup failed (not admin?)`. That is **intentional**. As admin, OBS raises its own GPU priority and can take frame time from the game. For a background clipper the game must win. |
-| **Process priority Normal** | Same reason. Do not raise it. |
-| **Lua sampler at 1 Hz, cached per window** | Costs ~0.008 microseconds per sample in steady state (measured). Note: OBS runs Lua timers on its video tick (render thread), so this is not "free by design", it is free because it is tiny: worst case ~33 us vs a 16,667 us frame. |
-| **Watchdog every 1 min, then exits** | Nothing resident. Each run is a few ms of PowerShell, only if not already running (`IgnoreNew`). |
+| NVENC hardware encoder | Separate video engine, not CUDA cores or CPU. x264 would take CPU from the game. |
+| AV1 | Smallest files at equal quality. Needs RTX 40 or newer, else NVENC HEVC. |
+| CQP 20 | Constant quality for local clips (not for streaming). |
+| Preset P7 | Slowest preset, still 0.0% skipped here. If "skipped frames due to encoding lag" ever appears, drop to P5 first. |
+| Look-ahead off, multipass off | Extra GPU work for little gain at CQP. |
+| Native 1440p, no rescale | Scaling costs render time. |
+| 60 FPS | Encoding at the game's ~480 fps would multiply encoder work. |
+| Game Capture | Hooks only the game, not the whole desktop. |
+| RAM buffer | No constant disk writes. ~3 GB when full. Shortening to 3 min would free ~2 GB, not worth it with 63.6 GB. |
+| OBS not admin, priority Normal | The log line `D3D11 GPU priority setup failed (not admin?)` is intentional. As admin OBS raises its GPU priority and can take frame time from the game. |
+| Lua sampler at 1 Hz, cached per window | ~0.008 us steady, ~33 us on window change. Lua timers run on OBS's video tick (render thread), so it is cheap because it is tiny, not because of which thread. |
+| VBS gate every minute | ~31 ms CPU vs ~280 ms for PowerShell. ~45 s CPU/day instead of ~7 min. |
 
-**Trade-off to know:** keeping the buffer running 24/7 keeps one NVENC session and ~4 GB of RAM busy all the time. A Sep 2026 Fortnite tuning pass listed it as the top thing to A/B test for 1% lows. The user chose to **keep it** because clipping matters more. To A/B test: `Disable-ScheduledTask 'OBS Replay Buffer Watchdog'`, close OBS, play, compare, then `Enable-ScheduledTask`.
+Trade-off: the 24/7 buffer keeps one NVENC session and ~3 GB RAM busy. A Fortnite tuning pass listed it as the top A/B candidate for 1% lows; the user chose to keep it. To A/B: `Disable-ScheduledTask 'OBS Replay Buffer Watchdog'`, close OBS, compare, `Enable-ScheduledTask`.
 
 ---
 
-## 4. History (what actually happened, in order)
+## 4. History
 
-1. **2026-07-03/04**: original build in a Claude Code session (transcript no longer exists). Created the profile, the watchdog, the action handler, the protocol, the task, `run-hidden.vbs`, and the first Lua flush script. That Lua version only checked the foreground window **once**, at save time.
-2. **2026-08-05/06** (jcode session "fish"): clips were landing in the wrong folders, e.g. Discord when you alt-tabbed before saving. The Lua script was rewritten into the focus-over-time sampler: RLE spans, fullscreen weighting, desktop/overlay/content tiers, per-HWND caching, plus the two test files. Cost was benchmarked before and after.
-3. **2026-09-13** (Claude Code session e629dab1): the profile was found **broken**: 720p30 and replay buffer off. It was rebuilt as the current `GameRec-AV1` (1440p60 NVENC AV1). Old profiles were backed up to `%LOCALAPPDATA%\Temp\claude\...\obs-profiles-backup-20260913-143837`. The fix was confirmed with a real save through the websocket. A test clip landed in `Videos\claude\`.
-   - This left a **stale orphan folder** `profiles\GameRec-AV1\` (with a hyphen) holding an old encoder file. OBS does not use it. The live folder is `profiles\GameRecAV1\`. If you edit files by hand, edit the right one.
-4. **2026-09-22** (jcode Fortnite optimization swarm): read-only audit. Found capture was Display Capture and recommended Game Capture. **The user switched it to Game Capture** (window mode, Fortnite).
-5. **2026-09-24**: this guide. Live checks: task healthy, websocket settings match, script loaded, sorting working, toast + Stay off button confirmed working, both test suites pass.
+1. **2026-07-03/04**: original build (Claude Code, transcript gone): profile, watchdog, toast + protocol, task, `run-hidden.vbs`, first Lua flush script (single foreground snapshot).
+2. **2026-08-05/06** (jcode "fish"): Lua rewritten into the focus-over-time sampler + tests.
+3. **2026-09-13** (Claude Code e629dab1): profile found broken (720p30, buffer off), rebuilt as `GameRec-AV1`. Left an orphan folder `profiles\GameRec-AV1\` (hyphen) that OBS does not use. The live one is `GameRecAV1`.
+4. **2026-09-22** (jcode optimization swarm): read-only audit. Capture switched from Display Capture to Game Capture.
+5. **2026-09-24**: docs written; then a robustness + lean pass:
+   - Name-clash fix: second same-minute save used to be stranded in `Videos\` (`rb Sep 21 09.14 PM.mp4`).
+   - Bug: if the toast failed, the old script died before saving the 5 min timer, so OBS was **never** relaunched. Now the timer is saved first.
+   - Bug: OBS 32 removed `--disable-shutdown-check`, so any relaunch after a crash stopped at the Safe Mode popup (seen live). Now stale crash markers are cleared before launch.
+   - Keep-alive moved into Lua; websocket code, password read and SHA256 auth removed.
+   - VBS gate added; state writes made atomic and locked; action log added; old boot-time format migrated automatically.
 
 ---
 
 ## 5. Gotchas an AI must not get wrong
 
-- **Never run the task as SYSTEM or with highest privileges.** The toasts vanish and OBS launches invisibly in another session.
-- **Register the protocol under HKCU\Software\Classes**, not HKLM. No admin is needed.
-- The toast AppID must be an app registered with Windows. The script borrows PowerShell's: `{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`. A made-up AppID fails silently.
-- **Stay off** snoozes for 5 minutes, then the toast **comes back** (it does not relaunch directly). **Ignoring** the toast relaunches after 5 minutes. These are two different paths, on purpose.
-- `--disable-shutdown-check` stops OBS from showing the "OBS did not shut down properly, safe mode?" dialog after crashes or reboots. Without it the silent launch can hang on that dialog.
-- obs-websocket v5 auth is `base64(sha256( base64(sha256(password + salt)) + challenge ))`.
-- If a websocket call fails (OBS still starting), the script exits 0 and simply tries again next minute. That is expected, not an error.
-- Clip folders are named after the **exe**, e.g. `FortniteClient-Win64-Shipping`, not a pretty game title.
-- `.ps1` files must stay plain ASCII/UTF-8 without fancy dashes. PowerShell 5.1 misreads UTF-8 without BOM, and non-ASCII characters can break parsing.
+- **Never** run the task as SYSTEM or with highest privileges.
+- Register the protocol under **HKCU\Software\Classes**, not HKLM.
+- The toast AppID must be registered with Windows; this borrows PowerShell's. A made-up one fails silently.
+- **Stay off** snoozes then asks again. **Ignoring** relaunches after 5 min. Different paths, on purpose.
+- **OBS 32 has no `--disable-shutdown-check`.** An unclean exit leaves `%APPDATA%\obs-studio\.sentinel\run_<uuid>`, and the next start blocks on "Run in Safe Mode?" before loading anything. Clear `run_*` files only when obs64 is **not** running. Safe Mode would also disable scripting, i.e. the Lua sorter and keep-alive.
+- The Lua keep-alive must stay hands-off during: the first 15 s after load (OBS starts the buffer itself), the post-save flush, and OBS exit. Otherwise it double-starts or fights shutdown.
+- VBScript under `On Error Resume Next`: an error **inside an If condition runs the Then branch**, the setting does **not** carry into functions, and `RegExp` needs `Global = True` to see duplicates. All three caused real bugs while writing the gate.
+- PowerShell: `[IO.File]::Replace(a, b, $null)` fails ("path is not of a legal form") because `$null` becomes `""`; use `[NullString]::Value`. Never name a parameter `$args`.
+- Folders are named after the **exe**, not a pretty title.
+
+---
+
+## 6. Re-render the flow chart
+
+```
+set PUPPETEER_SKIP_DOWNLOAD=1
+npx -y -p @mermaid-js/mermaid-cli@11 mmdc -i OBS-flow.mmd -o %USERPROFILE%\Desktop\OBS-flow.png -p edge.json -b white -w 1800 -s 1.5
+```
+with `edge.json` = `{ "executablePath": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "args": ["--no-sandbox"] }` (uses installed Edge, no Chromium download).
 
 ---
 
 ## Appendix: full source of every file
 
-### run-hidden.vbs
+### obs-watchdog-common.ps1
 
-```vb
-' Runs a PowerShell script with zero window flash.
-' Usage: wscript.exe run-hidden.vbs <script.ps1> [args...]
-Set sh = CreateObject("WScript.Shell")
-cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File"
-For i = 0 To WScript.Arguments.Count - 1
-    cmd = cmd & " """ & WScript.Arguments(i) & """"
-Next
-sh.Run cmd, 0, False
-```
+````powershell
+# Shared code for the OBS replay-buffer watchdog.
+# Dot-sourced by obs-replay-watchdog.ps1, obs-watchdog-action.ps1 and
+# test-watchdog.ps1. Keep this file plain ASCII: Windows PowerShell 5.1
+# misreads UTF-8 files that have no BOM.
+#
+# State file fields (obs-watchdog-state.json):
+#   lastSeenBoot  raw WMI LastBootUpTime of the boot we last handled. The
+#                 raw string (e.g. 20260924085141.500000-240) is used so the
+#                 VBS gate can compare it without date parsing.
+#   graceUntil    set when the "OBS closed" toast is shown. When it passes
+#                 with no answer, OBS is relaunched.
+#   snoozeUntil   set by the "Stay off 5 min" button.
 
-### obs-replay-watchdog.ps1
+$WatchdogDir = if ($env:OBS_WATCHDOG_STATEDIR) { $env:OBS_WATCHDOG_STATEDIR } else { $PSScriptRoot }
+$StateFile   = Join-Path $WatchdogDir 'obs-watchdog-state.json'
+$LogFile     = Join-Path $WatchdogDir 'obs-watchdog.log'
 
-```powershell
-# OBS replay buffer watchdog
-# - First run each boot: launch OBS silently with replay buffer, minimized to tray
-# - OBS closed later:   toast with Relaunch / Stay-off buttons; no answer in 5 min -> relaunch anyway
-# - OBS running:        ensure replay buffer active via obs-websocket
-$ErrorActionPreference = 'Stop'
+$ObsExe        = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
+$ObsDir        = Split-Path $ObsExe
+$GraceMinutes  = 5
+$SnoozeMinutes = 5
+$LogMaxBytes   = 256KB
+# Toasts need an AppID Windows already knows. This is PowerShell's own.
+$ToastAppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
 
-$obsExe    = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
-$obsDir    = 'C:\Program Files\obs-studio\bin\64bit'
-$wsPort    = 4455
-$wsConfig  = "$env:APPDATA\obs-studio\plugin_config\obs-websocket\config.json"
-$stateFile = "$PSScriptRoot\obs-watchdog-state.json"
-$graceMinutes = 5
-$toastAppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+# ------------------------------------------------------------ environment ---
+# Small wrappers so tests can replace them.
 
-function Launch-Obs {
-    Start-Process -FilePath $obsExe -WorkingDirectory $obsDir `
-        -ArgumentList '--startreplaybuffer', '--minimize-to-tray', '--disable-shutdown-check'
+function Get-Now { Get-Date }
+
+function Get-BootId { [string](Get-WmiObject Win32_OperatingSystem).LastBootUpTime }
+
+function Test-ObsRunning { [bool](Get-Process obs64 -ErrorAction SilentlyContinue) }
+
+# OBS 32 marks a running instance with a file in .sentinel and deletes it on a
+# clean exit. A leftover file (crash, force-kill, power loss, forced update
+# restart) makes the next start stop at a modal "Crash Detected / Run in Safe
+# Mode?" dialog, BEFORE anything loads: no replay buffer, no Lua. The old
+# --disable-shutdown-check flag that skipped this was removed in OBS 32. So
+# clear stale markers before each launch. Only called when no OBS is running,
+# so a live instance's marker is never touched. The crash log itself stays in
+# obs-studio\crashes.
+$SentinelDir = if ($env:OBS_WATCHDOG_SENTINELDIR) { $env:OBS_WATCHDOG_SENTINELDIR } `
+               else { Join-Path $env:APPDATA 'obs-studio\.sentinel' }
+
+function Clear-ObsCrashFlag {
+    if (-not (Test-Path $SentinelDir)) { return 0 }
+    $stale = @(Get-ChildItem $SentinelDir -File -Filter 'run_*' -ErrorAction SilentlyContinue)
+    foreach ($f in $stale) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue }
+    $stale.Count
+}
+
+function Start-Obs {
+    if (Test-ObsRunning) { return }   # never start a second instance
+    $n = Clear-ObsCrashFlag
+    if ($n) { Write-Log 'launch' "OBS last exited uncleanly: cleared $n crash marker(s) so it starts without the Safe Mode prompt" }
+    Start-Process -FilePath $ObsExe -WorkingDirectory $ObsDir `
+        -ArgumentList '--startreplaybuffer', '--minimize-to-tray'
 }
 
 function Show-Toast {
@@ -265,12 +288,12 @@ function Show-Toast {
   <visual>
     <binding template="ToastGeneric">
       <text>OBS closed - replay buffer is OFF</text>
-      <text>Auto-restarts in $graceMinutes minutes unless you pick.</text>
+      <text>Auto-restarts in $GraceMinutes minutes unless you pick.</text>
     </binding>
   </visual>
   <actions>
     <action content="Relaunch now" activationType="protocol" arguments="obs-watchdog:relaunch"/>
-    <action content="Stay off 5 min" activationType="protocol" arguments="obs-watchdog:snooze"/>
+    <action content="Stay off $SnoozeMinutes min" activationType="protocol" arguments="obs-watchdog:snooze"/>
   </actions>
   <audio src="ms-winsoundevent:Notification.Default"/>
 </toast>
@@ -280,182 +303,399 @@ function Show-Toast {
     $toast = New-Object Windows.UI.Notifications.ToastNotification($doc)
     $toast.Tag = 'obs-watchdog'
     $toast.Group = 'obs-watchdog'
-    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($toastAppId).Show($toast)
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($ToastAppId).Show($toast)
 }
 
 function Remove-Toast {
     try {
         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-        [Windows.UI.Notifications.ToastNotificationManager]::History.Remove('obs-watchdog', 'obs-watchdog', $toastAppId)
+        [Windows.UI.Notifications.ToastNotificationManager]::History.Remove('obs-watchdog', 'obs-watchdog', $ToastAppId)
     } catch {}
 }
 
-$state = @{ lastSeenBoot = ''; snoozeUntil = ''; graceUntil = '' }
-if (Test-Path $stateFile) {
+# ---------------------------------------------------------------- logging ---
+# One line per real action. Quiet runs write nothing. Rotates at 256 KB.
+
+function Write-Log([string]$Source, [string]$Message) {
     try {
-        $j = Get-Content $stateFile -Raw | ConvertFrom-Json
-        $state.lastSeenBoot = [string]$j.lastSeenBoot
-        $state.snoozeUntil  = [string]$j.snoozeUntil
-        $state.graceUntil   = [string]$j.graceUntil
+        if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt $LogMaxBytes) {
+            Move-Item $LogFile "$LogFile.1" -Force
+        }
+        $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Source, $Message
+        [IO.File]::AppendAllText($LogFile, $line + "`r`n")
     } catch {}
 }
-function Save-State { $state | ConvertTo-Json | Set-Content $stateFile }
 
-$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')
+# ------------------------------------------------------------------ state ---
 
-if (-not (Get-Process obs64 -ErrorAction SilentlyContinue)) {
+function New-State { [ordered]@{ lastSeenBoot = ''; snoozeUntil = ''; graceUntil = '' } }
 
-    if ($state.lastSeenBoot -ne $boot) {
-        # first launch this boot - silent, no questions
-        Launch-Obs
-        $state.lastSeenBoot = $boot
-        $state.snoozeUntil  = ''
-        $state.graceUntil   = ''
-        Save-State
-        exit 0
-    }
-
-    if ($state.snoozeUntil -and (Get-Date) -lt [datetime]$state.snoozeUntil) {
-        exit 0   # user chose Stay off - respect it
-    }
-
-    if ($state.graceUntil) {
-        if ((Get-Date) -lt [datetime]$state.graceUntil) {
-            exit 0   # toast pending, still inside grace window
+function Read-State {
+    $s = New-State
+    if (Test-Path $StateFile) {
+        try {
+            $j = [IO.File]::ReadAllText($StateFile) | ConvertFrom-Json
+            foreach ($k in @($s.Keys)) { if ($null -ne $j.$k) { $s[$k] = [string]$j.$k } }
+        } catch {
+            Write-Log 'state' "state file unreadable, starting fresh: $($_.Exception.Message)"
         }
-        # grace expired with no answer - relaunch so recording is never forgotten
-        Launch-Obs
-        $state.graceUntil  = ''
-        $state.snoozeUntil = ''
-        Save-State
-        Remove-Toast
-        exit 0
+    }
+    $s
+}
+
+# Write to a temp file, then swap it in, so a reader (or a crash) never sees
+# a half-written file. Retries briefly in case the VBS gate is reading it.
+function Save-State($s) {
+    $tmp  = "$StateFile.tmp"
+    $json = $s | ConvertTo-Json
+    [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding $false))
+    for ($i = 1; ; $i++) {
+        try {
+            # [NullString]: PowerShell turns a plain $null into "" for string
+            # parameters, which Replace rejects as "not of a legal form".
+            if (Test-Path $StateFile) { [IO.File]::Replace($tmp, $StateFile, [NullString]::Value, $true) }
+            else { [IO.File]::Move($tmp, $StateFile) }
+            return
+        } catch {
+            if ($i -ge 10) { throw }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+}
+
+function ConvertTo-Time([string]$s) {
+    if (-not $s) { return $null }
+    $t = [datetime]::MinValue
+    $ok = [datetime]::TryParse($s, [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind, [ref]$t)
+    if ($ok) { $t } else { $null }
+}
+
+# Both scripts read-modify-write the state file and may launch OBS. The lock
+# stops a button click and a watchdog run from racing each other.
+function Invoke-Locked([scriptblock]$Body) {
+    $m = New-Object Threading.Mutex($false, 'Local\obs-watchdog')
+    $held = $false
+    try {
+        try { $held = $m.WaitOne(10000) } catch [Threading.AbandonedMutexException] { $held = $true }
+        if (-not $held) { Write-Log 'lock' 'timed out waiting for lock, skipped this run'; return }
+        & $Body
+    } finally {
+        if ($held) { $m.ReleaseMutex() }
+        $m.Dispose()
+    }
+}
+
+# --------------------------------------------------------------- decision ---
+# Before 2026-09-24 lastSeenBoot was stored as ISO time
+# (2026-09-24T08:51:41.5000000-04:00). It is now the raw WMI string. If an old
+# value names the SAME boot, rewrite it in the new format instead of treating
+# it as a new boot (which would silently relaunch OBS instead of asking).
+function Update-LegacyBoot($State, [string]$Boot) {
+    $old = [string]$State.lastSeenBoot
+    if ($old -notmatch 'T') { return $State }
+    try {
+        $then = ConvertTo-Time $old
+        $now  = [Management.ManagementDateTimeConverter]::ToDateTime($Boot)
+        if ($then -and [math]::Abs(($then.ToUniversalTime() - $now.ToUniversalTime()).TotalSeconds) -lt 2) {
+            $State.lastSeenBoot = $Boot
+        }
+    } catch {}
+    $State
+}
+
+# Pure: no side effects, so every branch is unit-tested.
+# Returns @{ Action = ...; State = <new state> }.
+#
+#   OBS running:
+#     state already current            -> none
+#     otherwise (new boot / timers set) -> running-update, or
+#                                          running-clear-toast if a toast was pending
+#   OBS not running:
+#     boot differs                     -> launch-boot   (silent, no question)
+#     snoozed                          -> wait-snooze
+#     toast pending, grace not over    -> wait-grace
+#     toast pending, grace over        -> relaunch-grace
+#     otherwise (just closed)          -> toast
+function Get-WatchdogDecision {
+    param($State, [string]$Boot, [bool]$ObsRunning, [datetime]$Now)
+
+    $s = New-State
+    foreach ($k in @($s.Keys)) { $s[$k] = [string]$State[$k] }
+
+    if ($ObsRunning) {
+        if ($s.lastSeenBoot -eq $Boot -and -not $s.snoozeUntil -and -not $s.graceUntil) {
+            return @{ Action = 'none'; State = $s }
+        }
+        $action = if ($s.graceUntil) { 'running-clear-toast' } else { 'running-update' }
+        $s.lastSeenBoot = $Boot; $s.snoozeUntil = ''; $s.graceUntil = ''
+        return @{ Action = $action; State = $s }
     }
 
-    # OBS newly closed - post toast and start grace timer
-    Show-Toast
-    $state.graceUntil = (Get-Date).AddMinutes($graceMinutes).ToString('o')
-    Save-State
-    exit 0
+    if ($s.lastSeenBoot -ne $Boot) {
+        $s.lastSeenBoot = $Boot; $s.snoozeUntil = ''; $s.graceUntil = ''
+        return @{ Action = 'launch-boot'; State = $s }
+    }
+
+    $snooze = ConvertTo-Time $s.snoozeUntil
+    if ($snooze -and $Now -lt $snooze) { return @{ Action = 'wait-snooze'; State = $s } }
+
+    $grace = ConvertTo-Time $s.graceUntil
+    if ($grace) {
+        if ($Now -lt $grace) { return @{ Action = 'wait-grace'; State = $s } }
+        $s.snoozeUntil = ''; $s.graceUntil = ''
+        return @{ Action = 'relaunch-grace'; State = $s }
+    }
+
+    # Just closed (or an unreadable timer, which self-heals here).
+    $s.snoozeUntil = ''
+    $s.graceUntil = $Now.AddMinutes($GraceMinutes).ToString('o')
+    return @{ Action = 'toast'; State = $s }
 }
 
-# OBS running - mark seen this boot, clear snooze/grace, drop stale toast
-if ($state.lastSeenBoot -ne $boot -or $state.snoozeUntil -or $state.graceUntil) {
-    if ($state.graceUntil) { Remove-Toast }
-    $state.lastSeenBoot = $boot
-    $state.snoozeUntil  = ''
-    $state.graceUntil   = ''
-    Save-State
+# ---------------------------------------------------------------- runners ---
+
+function Invoke-Watchdog {
+    Invoke-Locked {
+        $boot  = Get-BootId
+        $raw   = Read-State
+        $before = $raw.lastSeenBoot
+        $state = Update-LegacyBoot $raw $boot
+        $d = Get-WatchdogDecision -State $state -Boot $boot `
+                -ObsRunning (Test-ObsRunning) -Now (Get-Now)
+        if ($d.Action -in 'none', 'wait-snooze', 'wait-grace') {
+            # A migrated legacy boot must still be written, or the VBS gate
+            # never sees a match and starts PowerShell every minute.
+            if ($d.State.lastSeenBoot -ne $before) {
+                Save-State $d.State
+                Write-Log 'watchdog' 'migrated lastSeenBoot to the new format'
+            }
+            return
+        }
+
+        # Persist BEFORE any side effect: if the toast or launch fails, the
+        # timers are already saved and the next run still does the right thing.
+        Save-State $d.State
+
+        switch ($d.Action) {
+            'launch-boot' {
+                Start-Obs
+                Write-Log 'watchdog' 'first run this boot: launched OBS'
+            }
+            'toast' {
+                try {
+                    Show-Toast
+                    Write-Log 'watchdog' "OBS closed: toast shown, auto-relaunch at $($d.State.graceUntil)"
+                } catch {
+                    Write-Log 'watchdog' "OBS closed: TOAST FAILED ($($_.Exception.Message)), auto-relaunch still at $($d.State.graceUntil)"
+                }
+            }
+            'relaunch-grace' {
+                Remove-Toast
+                Start-Obs
+                Write-Log 'watchdog' "no answer within $GraceMinutes min: relaunched OBS"
+            }
+            'running-clear-toast' {
+                Remove-Toast
+                Write-Log 'watchdog' 'OBS running again: cleared pending toast'
+            }
+            'running-update' { }   # routine bookkeeping, not worth a log line
+        }
+    }
 }
 
-# ensure replay buffer active over obs-websocket (v5 protocol)
-$password = (Get-Content $wsConfig -Raw | ConvertFrom-Json).server_password
-
-function Get-Sha256Base64([string]$s) {
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try { [Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($s))) }
-    finally { $sha.Dispose() }
+function Invoke-ToastAction([string]$Uri) {
+    Invoke-Locked {
+        $s = Read-State
+        if ($Uri -match 'snooze') {
+            $s.snoozeUntil = (Get-Now).AddMinutes($SnoozeMinutes).ToString('o')
+            $s.graceUntil  = ''
+            Save-State $s
+            Write-Log 'button' "Stay off: snoozed until $($s.snoozeUntil)"
+        } else {
+            $s.snoozeUntil = ''
+            $s.graceUntil  = ''
+            Save-State $s
+            if (Test-ObsRunning) {
+                Write-Log 'button' 'Relaunch now: OBS was already running'
+            } else {
+                Start-Obs
+                Write-Log 'button' 'Relaunch now: launched OBS'
+            }
+        }
+    }
+    Remove-Toast
 }
+````
 
-$cts = [System.Threading.CancellationTokenSource]::new(10000)
-$ct  = $cts.Token
-$ws  = [System.Net.WebSockets.ClientWebSocket]::new()
+### obs-replay-watchdog.ps1
 
-function Send-Json($obj) {
-    $bytes = [Text.Encoding]::UTF8.GetBytes(($obj | ConvertTo-Json -Depth 6 -Compress))
-    $ws.SendAsync([ArraySegment[byte]]::new($bytes),
-        [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
-}
-
-function Receive-Json {
-    $buf = [byte[]]::new(65536)
-    $seg = [ArraySegment[byte]]::new($buf)
-    $ms  = [System.IO.MemoryStream]::new()
-    do {
-        $res = $ws.ReceiveAsync($seg, $ct).GetAwaiter().GetResult()
-        $ms.Write($buf, 0, $res.Count)
-    } while (-not $res.EndOfMessage)
-    [Text.Encoding]::UTF8.GetString($ms.ToArray()) | ConvertFrom-Json
-}
+````powershell
+# OBS replay buffer watchdog. Runs from Task Scheduler via obs-watchdog-gate.vbs,
+# which only starts this script when there may be something to do.
+# - First run each boot: launch OBS silently with the replay buffer, in the tray.
+# - OBS closed later:   toast with Relaunch / Stay-off buttons. No answer in
+#                       5 min -> relaunch anyway.
+# Keeping the replay buffer running while OBS is open is done inside OBS by
+# obs-replay-flush.lua, so this script never talks to OBS (no websocket).
+# Logic lives in obs-watchdog-common.ps1. Actions are logged to obs-watchdog.log.
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'obs-watchdog-common.ps1')
 
 try {
-    $ws.ConnectAsync([Uri]"ws://127.0.0.1:$wsPort/", $ct).Wait()
-
-    $hello    = Receive-Json   # op 0: Hello
-    $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0 } }
-    if ($hello.d.authentication) {
-        $secret = Get-Sha256Base64 ($password + $hello.d.authentication.salt)
-        $identify.d.authentication = Get-Sha256Base64 ($secret + $hello.d.authentication.challenge)
-    }
-    Send-Json $identify
-    $null = Receive-Json       # op 2: Identified
-
-    Send-Json @{ op = 6; d = @{ requestType = 'GetReplayBufferStatus'; requestId = 'rb-status' } }
-    $status = Receive-Json
-
-    if (-not $status.d.responseData.outputActive) {
-        Send-Json @{ op = 6; d = @{ requestType = 'StartReplayBuffer'; requestId = 'rb-start' } }
-        $null = Receive-Json
-    }
-
-    $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, '', $ct).Wait()
+    Invoke-Watchdog
+} catch {
+    Write-Log 'watchdog' "ERROR: $($_.Exception.Message)"
+    exit 1
 }
-catch {
-    # websocket unreachable (OBS still booting, server disabled) - retry next run
-    exit 0
-}
-finally {
-    $ws.Dispose()
-    $cts.Dispose()
-}
-```
+````
 
 ### obs-watchdog-action.ps1
 
-```powershell
-# Handles toast button clicks via obs-watchdog: protocol
+````powershell
+# Handles toast button clicks via the obs-watchdog: protocol (HKCU).
 # URIs: obs-watchdog:relaunch | obs-watchdog:snooze
 param([string]$Uri)
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'obs-watchdog-common.ps1')
 
-$obsExe    = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
-$obsDir    = 'C:\Program Files\obs-studio\bin\64bit'
-$stateFile = "$PSScriptRoot\obs-watchdog-state.json"
-$snoozeMinutes = 5
-
-$state = @{ lastSeenBoot = ''; snoozeUntil = ''; graceUntil = '' }
-if (Test-Path $stateFile) {
-    $j = Get-Content $stateFile -Raw | ConvertFrom-Json
-    $state.lastSeenBoot = [string]$j.lastSeenBoot
-    $state.snoozeUntil  = [string]$j.snoozeUntil
-    $state.graceUntil   = [string]$j.graceUntil
-}
-
-if ($Uri -match 'snooze') {
-    $state.snoozeUntil = (Get-Date).AddMinutes($snoozeMinutes).ToString('o')
-    $state.graceUntil  = ''
-}
-else {  # relaunch (default)
-    $state.snoozeUntil = ''
-    $state.graceUntil  = ''
-    if (-not (Get-Process obs64 -ErrorAction SilentlyContinue)) {
-        Start-Process -FilePath $obsExe -WorkingDirectory $obsDir `
-            -ArgumentList '--startreplaybuffer', '--minimize-to-tray', '--disable-shutdown-check'
-    }
-}
-$state | ConvertTo-Json | Set-Content $stateFile
-
-# clear the toast from Action Center
 try {
-    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-    $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
-    [Windows.UI.Notifications.ToastNotificationManager]::History.Remove('obs-watchdog', 'obs-watchdog', $appId)
-} catch {}
-```
+    Invoke-ToastAction $Uri
+} catch {
+    Write-Log 'button' "ERROR: $($_.Exception.Message)"
+    exit 1
+}
+````
+
+### obs-watchdog-gate.vbs
+
+````vb
+' OBS watchdog gate. Task Scheduler runs this every minute instead of starting
+' PowerShell directly. PowerShell costs ~350 ms CPU per start. This check
+' costs ~25 ms, and almost every minute it finds nothing to do.
+'
+' It exits quietly ONLY when all of these are true:
+'   1. obs64.exe is running
+'   2. the state file says this boot was already handled (lastSeenBoot matches)
+'   3. no toast is pending and no snooze is set (graceUntil and snoozeUntil empty)
+' In every other case, including ANY error here, it runs obs-replay-watchdog.ps1
+' exactly as before (fail-open), so the gate can only save work, never skip it.
+'
+' The state file is written by the .ps1 as JSON with fixed field names. The
+' values checked here are plain strings, so a simple pattern match is enough.
+Option Explicit
+On Error Resume Next
+
+Dim fso, dir, stateFile, ps1, sh, testDir
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set sh = CreateObject("WScript.Shell")
+dir = fso.GetParentFolderName(WScript.ScriptFullName)
+ps1 = dir & "\obs-replay-watchdog.ps1"
+stateFile = dir & "\obs-watchdog-state.json"
+' Test hook (test-gate.ps1): read state from a temp dir, report instead of run.
+testDir = sh.ExpandEnvironmentStrings("%OBS_WATCHDOG_STATEDIR%")
+If testDir <> "%OBS_WATCHDOG_STATEDIR%" And testDir <> "" Then
+    stateFile = testDir & "\obs-watchdog-state.json"
+End If
+
+' Never call CanSkip inside an If: see the trap described below.
+Dim skip
+skip = False
+skip = CanSkip()
+If Err.Number <> 0 Then skip = False
+If skip = True Then WScript.Quit 10
+If testDir <> "%OBS_WATCHDOG_STATEDIR%" And testDir <> "" Then WScript.Quit 20
+RunWatchdog
+WScript.Quit 0
+
+' VBScript traps (both caused real bugs while writing this):
+'  1. Under "On Error Resume Next", an error INSIDE an If condition runs the
+'     Then branch. So nothing that can fail is evaluated inside an If.
+'  2. "On Error Resume Next" does not carry into functions. Without its own,
+'     an error in a function aborts it and resurfaces in the caller. So every
+'     function below enables it itself.
+Function CanSkip()
+    On Error Resume Next
+    CanSkip = False
+    Dim wmi, procs, n, os, boot, ts, text, v
+    Err.Clear
+
+    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+    If Err.Number <> 0 Then Exit Function
+
+    Set procs = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE Name = 'obs64.exe'")
+    n = -1
+    n = procs.Count
+    If Err.Number <> 0 Then Exit Function
+    If n < 1 Then Exit Function
+
+    boot = ""
+    For Each os In wmi.ExecQuery("SELECT LastBootUpTime FROM Win32_OperatingSystem")
+        boot = os.LastBootUpTime
+    Next
+    If Err.Number <> 0 Then Exit Function
+    If Len(boot) < 14 Then Exit Function
+
+    Set ts = fso.OpenTextFile(stateFile, 1)   ' missing file -> error -> run
+    If Err.Number <> 0 Then Exit Function
+    text = ""
+    text = ts.ReadAll                           ' empty file -> error 62 -> run
+    ts.Close
+    If Err.Number <> 0 Then Exit Function
+
+    v = Field(text, "lastSeenBoot")
+    If Err.Number <> 0 Then Exit Function
+    If v <> boot Then Exit Function
+    v = Field(text, "graceUntil")
+    If Err.Number <> 0 Then Exit Function
+    If v <> "" Then Exit Function
+    v = Field(text, "snoozeUntil")
+    If Err.Number <> 0 Then Exit Function
+    If v <> "" Then Exit Function
+
+    CanSkip = True
+End Function
+
+' Value of a "name": "value" string field, or "?" if it isn't there exactly
+' once. "?" never equals a real value, so the gate falls through and runs.
+Function Field(text, name)
+    On Error Resume Next
+    Dim re, m, c
+    Field = "?"
+    Set re = New RegExp
+    re.Global = True        ' default False stops at the first match, hiding duplicates
+    re.Pattern = """" & name & """\s*:\s*""([^""]*)"""
+    Set m = re.Execute(text)
+    c = 0
+    c = m.Count
+    If Err.Number <> 0 Then Exit Function
+    If c = 1 Then Field = m(0).SubMatches(0)
+    If Err.Number <> 0 Then Field = "?"
+End Function
+
+Sub RunWatchdog()
+    On Error Resume Next
+    Err.Clear
+    sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & ps1 & """", 0, False
+End Sub
+````
+
+### run-hidden.vbs
+
+````vb
+' Runs a PowerShell script with zero window flash.
+' Usage: wscript.exe run-hidden.vbs <script.ps1> [args...]
+Set sh = CreateObject("WScript.Shell")
+cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File"
+For i = 0 To WScript.Arguments.Count - 1
+    cmd = cmd & " """ & WScript.Arguments(i) & """"
+Next
+sh.Run cmd, 0, False
+````
 
 ### obs-replay-flush.lua
 
-```lua
+````lua
 -- OBS: replay-buffer flush + smart per-game clip sorting.
 --
 -- 1) Restarts the replay buffer after each save so consecutive clips never
@@ -650,6 +890,12 @@ M.now = function() return os.time() end
 function sample_tick()
     local exe, weight = M.foreground_info()
     M.record(exe, weight, M.now())
+    if obs then
+        -- Isolated so a keep-alive fault can never stop focus sampling.
+        -- (M.K, not K: the local K is declared further down.)
+        local ok, err = pcall(M.keepalive)
+        if not ok and not M.K.warned then M.K.warned = true; print("keep-alive error: " .. tostring(err)) end
+    end
 end
 
 -- Folder for a clip covering the last `seconds`, with live-probe fallback.
@@ -666,6 +912,54 @@ end
 
 local restarting = false
 local rec_start_t = nil
+
+-- ------------------------------------------------ replay buffer keep-alive ---
+-- The buffer must always be running while OBS is open. This replaces the old
+-- external obs-websocket check: it rides the existing 1 Hz sample timer, so it
+-- costs one boolean call per second.
+--
+-- It stays hands-off when a stop is expected:
+--   * first STARTUP_GRACE s after load (OBS starts the buffer itself via
+--     --startreplaybuffer about 1 s after scripts load)
+--   * during the post-save flush (stop -> STOPPED event -> start)
+--   * once OBS is exiting
+-- A failing start (e.g. encoder error) makes OBS show an error dialog, so
+-- retries back off 10 s, 20 s, 40 s ... up to 5 min, and reset once the
+-- buffer is seen running again.
+
+local STARTUP_GRACE = 15
+local FLUSH_HOLD = 5
+local RETRY_MIN, RETRY_MAX = 10, 300
+
+local K = { loaded_at = 0, hold_until = 0, next_try = 0, delay = RETRY_MIN, exiting = false }
+M.K = K
+
+local function buffer_available()
+    local out = obs.obs_frontend_get_replay_buffer_output()
+    if out == nil then return false end   -- replay buffer disabled in settings
+    obs.obs_output_release(out)
+    return true
+end
+
+function M.keepalive()
+    local now = M.now()
+    if K.exiting or now < K.loaded_at + STARTUP_GRACE then return end
+
+    if obs.obs_frontend_replay_buffer_active() then
+        K.delay, K.next_try = RETRY_MIN, 0
+        return
+    end
+    if now < K.hold_until then return end
+    -- The flush never saw its STOPPED event: drop the flag so a later
+    -- manual stop isn't mistaken for a flush.
+    restarting = false
+    if now < K.next_try or not buffer_available() then return end
+
+    print("keep-alive: replay buffer was off, starting it")
+    obs.obs_frontend_replay_buffer_start()
+    K.next_try = now + K.delay
+    K.delay = math.min(K.delay * 2, RETRY_MAX)
+end
 
 local function replay_seconds()
     local ok, secs = pcall(function()
@@ -727,10 +1021,15 @@ function on_event(event)
         M.move_to_folder(obs.obs_frontend_get_last_replay(),
                          M.folder_for_clip(replay_seconds()))
         restarting = true
+        K.hold_until = M.now() + FLUSH_HOLD
         obs.timer_add(do_stop, 100)
     elseif event == obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED and restarting then
         restarting = false
+        K.hold_until = M.now() + FLUSH_HOLD   -- do_start fires in 500 ms
         obs.timer_add(do_start, 500)
+    elseif event == obs.OBS_FRONTEND_EVENT_EXIT
+        or event == obs.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
+        K.exiting = true
     elseif event == obs.OBS_FRONTEND_EVENT_RECORDING_STARTED then
         rec_start_t = M.now()
     elseif event == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED then
@@ -742,6 +1041,7 @@ end
 
 function script_load(settings)
     obs.obs_frontend_add_event_callback(on_event)
+    K.loaded_at = M.now()
     obs.timer_add(sample_tick, SAMPLE_MS)
     sample_tick()
     print("replay-flush + smart game-sort loaded")
@@ -752,15 +1052,288 @@ function script_unload()
 end
 
 function script_description()
-    return "Flush the replay buffer after each save (no overlap) and sort clips/recordings " ..
-           "into per-game folders using the app that held focus for most of the clip " ..
+    return "Flush the replay buffer after each save (no overlap), keep the replay buffer " ..
+           "running while OBS is open, and sort clips/recordings into per-game folders " ..
+           "using the app that held focus for most of the clip " ..
            "(ignores Discord/Steam/shell pass-throughs)."
 end
-```
+````
+
+### OBS-flow.mmd
+
+````mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    fontFamily: Segoe UI, Arial
+    fontSize: 15px
+    primaryColor: "#eef4ff"
+    primaryBorderColor: "#4a6fa5"
+    lineColor: "#4a6fa5"
+---
+flowchart TD
+    subgraph A ["1. EVERY MINUTE: Windows checks on OBS (Task Scheduler)"]
+        direction TB
+        T1["Task Scheduler<br/>at logon + every 1 min"] --> G{"obs-watchdog-gate.vbs<br/>OBS running AND nothing pending?"}
+        G -->|"yes, about 99.9% of runs<br/>~30 ms CPU"| Q1["exit, nothing to do"]
+        G -->|"no, or any error"| W["obs-replay-watchdog.ps1<br/>~280 ms CPU, only when needed"]
+        W --> D1{"OBS running?"}
+        D1 -->|yes| U["update state, remove old toast"]
+        D1 -->|no| D2{"first run since boot?"}
+        D2 -->|yes| L1["launch OBS silently"]
+        D2 -->|no| D3{"Stay off pressed?"}
+        D3 -->|"yes, under 5 min"| Q2["wait"]
+        D3 -->|no| D4{"toast already shown?"}
+        D4 -->|"no, OBS just closed"| TO["save 5 min timer, then show toast"]
+        D4 -->|"yes, under 5 min"| Q3["wait"]
+        D4 -->|"yes, 5 min passed"| L2["relaunch OBS"]
+    end
+
+    subgraph B ["2. TOAST BUTTONS"]
+        direction TB
+        TO -.-> BT1["Relaunch now"]
+        TO -.-> BT2["Stay off 5 min"]
+        TO -.-> BT3["X or ignore"]
+        BT1 --> L3["launch OBS now"]
+        BT2 --> SN["quiet for 5 min, then toast again"]
+        BT3 -->|"after the 5 min timer"| L2
+    end
+
+    subgraph C ["3. EVERY LAUNCH"]
+        direction TB
+        L1 --> CL["delete leftover crash markers<br/>so no Safe Mode popup"]
+        L2 --> CL
+        L3 --> CL
+        CL --> OB["obs64 --startreplaybuffer --minimize-to-tray"]
+    end
+
+    subgraph D ["4. INSIDE OBS: obs-replay-flush.lua, every 1 second"]
+        direction TB
+        OB --> TK["which window is in front?<br/>~0.008 microseconds"]
+        TK --> KA{"replay buffer on?"}
+        KA -->|yes| OK["nothing"]
+        KA -->|"no, and not mid-save"| RS["start it again<br/>measured: back in 1.3 s"]
+    end
+
+    subgraph E ["5. ALT+Z SAVE"]
+        direction TB
+        SV["Alt+Z"] --> SC["folder = app in front<br/>longest during the clip"]
+        SC --> MV["move to Videos\GameName\<br/>adds (2) if name taken"]
+        MV --> FL["restart buffer once<br/>so next clip has no repeat"]
+    end
+    TK -.-> SC
+
+    ST[("obs-watchdog-state.json<br/>boot, toast timer, snooze")]
+    LG[("obs-watchdog.log<br/>one line per real action")]
+    W -.-> ST
+    W -.-> LG
+````
+
+### test-watchdog.ps1
+
+````powershell
+# Tests for the OBS watchdog. Run:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File test-watchdog.ps1
+# Covers every decision branch, plus the runner with fake OBS / toast / clock
+# in a temp folder. Never touches the real state file, log, OBS, or toasts.
+$ErrorActionPreference = 'Stop'
+$tmp = Join-Path $env:TEMP ("obs-watchdog-test-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmp | Out-Null
+$env:OBS_WATCHDOG_STATEDIR = $tmp
+. (Join-Path $PSScriptRoot 'obs-watchdog-common.ps1')
+
+$script:pass = 0; $script:fail = 0
+function Check($name, $got, $expect) {
+    if ("$got" -eq "$expect") { $script:pass++; "PASS  $name" }
+    else { $script:fail++; "FAIL  $name  expected=[$expect] got=[$got]" }
+}
+
+$BOOT  = '20260924085141.500000-240'
+$BOOT2 = '20260925090000.000000-240'
+$NOW   = [datetime]'2026-09-24T12:00:00'
+function S($boot = $BOOT, $snooze = '', $grace = '') {
+    $s = New-State; $s.lastSeenBoot = $boot; $s.snoozeUntil = $snooze; $s.graceUntil = $grace; $s
+}
+function D($state, $running, $now = $NOW) {
+    Get-WatchdogDecision -State $state -Boot $BOOT -ObsRunning $running -Now $now
+}
+$later  = $NOW.AddMinutes(3).ToString('o')
+$before = $NOW.AddMinutes(-1).ToString('o')
+
+'--- decisions ---'
+Check 'running, state current -> none'               (D (S) $true).Action 'none'
+Check 'running, new boot -> running-update'          (D (S $BOOT2) $true).Action 'running-update'
+Check 'running, toast pending -> clear toast'        (D (S $BOOT '' $later) $true).Action 'running-clear-toast'
+Check 'running, snoozed -> update (snooze cleared)'  (D (S $BOOT $later '') $true).State.snoozeUntil ''
+Check 'fresh state file, OBS off -> launch-boot'     (D (New-State) $false).Action 'launch-boot'
+Check 'new boot, OBS off -> launch-boot'             (D (S $BOOT2) $false).Action 'launch-boot'
+Check 'launch-boot records boot'                     (D (S $BOOT2) $false).State.lastSeenBoot $BOOT
+Check 'just closed -> toast'                         (D (S) $false).Action 'toast'
+Check 'toast sets grace to now+5min'                 (D (S) $false).State.graceUntil $NOW.AddMinutes(5).ToString('o')
+Check 'grace pending -> wait-grace'                  (D (S $BOOT '' $later) $false).Action 'wait-grace'
+Check 'grace expired -> relaunch-grace'              (D (S $BOOT '' $before) $false).Action 'relaunch-grace'
+Check 'relaunch clears grace'                        (D (S $BOOT '' $before) $false).State.graceUntil ''
+Check 'snoozed -> wait-snooze'                       (D (S $BOOT $later '') $false).Action 'wait-snooze'
+Check 'snooze over -> toast again'                   (D (S $BOOT $before '') $false).Action 'toast'
+Check 'garbage timer -> toast (self-heals)'          (D (S $BOOT 'not-a-date' 'junk') $false).Action 'toast'
+Check 'decision does not mutate input'               ($(
+        $in = S $BOOT '' $later; $null = D $in $true; $in.graceUntil)) $later
+
+'--- legacy boot format migration ---'
+$legacy = S '2026-09-24T08:51:41.5000000-04:00'
+Check 'old ISO boot of SAME boot is migrated'        (Update-LegacyBoot $legacy $BOOT).lastSeenBoot $BOOT
+Check 'migrated + OBS off -> toast, not relaunch'    (D (Update-LegacyBoot (S '2026-09-24T08:51:41.5000000-04:00') $BOOT) $false).Action 'toast'
+Check 'old ISO boot of OTHER boot is left alone'     (Update-LegacyBoot (S '2026-09-20T10:00:00.0000000-04:00') $BOOT).lastSeenBoot '2026-09-20T10:00:00.0000000-04:00'
+
+'--- runner with fakes (temp dir) ---'
+$script:obsUp = $false; $script:launches = 0; $script:toasts = 0; $script:clock = $NOW
+$script:toastThrows = $false
+function Get-Now { $script:clock }
+function Get-BootId { $BOOT }
+function Test-ObsRunning { $script:obsUp }
+function Start-Obs { $script:launches++; $script:obsUp = $true }
+function Show-Toast { if ($script:toastThrows) { throw 'toast subsystem broken' }; $script:toasts++ }
+function Remove-Toast { }
+
+Save-State (S)
+Invoke-Watchdog
+Check 'closed: one toast'                            $script:toasts 1
+Check 'closed: grace persisted'                      ([bool](Read-State).graceUntil) $true
+$script:clock = $NOW.AddMinutes(2); Invoke-Watchdog
+Check 'inside grace: no second toast, no launch'     "$($script:toasts)/$($script:launches)" '1/0'
+$script:clock = $NOW.AddMinutes(6); Invoke-Watchdog
+Check 'grace expired: relaunched once'               $script:launches 1
+
+# The bug this rewrite fixes: a failing toast used to stop the script before
+# graceUntil was saved, so OBS was never relaunched.
+$script:obsUp = $false; $script:launches = 0; $script:toastThrows = $true; $script:clock = $NOW
+Save-State (S)
+Invoke-Watchdog
+Check 'toast throws: grace STILL persisted'          ([bool](Read-State).graceUntil) $true
+Check 'toast throws: failure logged'                 ([bool](Select-String -Path $LogFile -Pattern 'TOAST FAILED' -Quiet)) $true
+$script:clock = $NOW.AddMinutes(6); Invoke-Watchdog
+Check 'toast throws: still auto-relaunches'          $script:launches 1
+$script:toastThrows = $false
+
+'--- buttons ---'
+$script:obsUp = $false; $script:launches = 0; $script:clock = $NOW
+Save-State (S $BOOT '' $later)
+Invoke-ToastAction 'obs-watchdog:snooze'
+Check 'snooze: snoozeUntil = now+5'                  (Read-State).snoozeUntil $NOW.AddMinutes(5).ToString('o')
+Check 'snooze: grace cleared'                        (Read-State).graceUntil ''
+Invoke-Watchdog
+Check 'snoozed: watchdog stays quiet'                "$($script:launches)" '0'
+Invoke-ToastAction 'obs-watchdog:relaunch'
+Check 'relaunch button: launched'                    $script:launches 1
+Invoke-ToastAction 'obs-watchdog:relaunch'
+Check 'relaunch button twice: no second OBS'         $script:launches 1
+
+'--- state file robustness ---'
+Set-Content $StateFile '{ this is not json'
+Check 'corrupt state file -> fresh state'            (Read-State).lastSeenBoot ''
+Save-State (S)
+Check 'atomic save leaves no temp file'              (Test-Path "$StateFile.tmp") $false
+Check 'saved file round-trips'                       (Read-State).lastSeenBoot $BOOT
+
+'--- crash marker cleanup (Safe Mode prompt) ---'
+$sd = Join-Path $tmp 'sentinel'
+New-Item -ItemType Directory $sd | Out-Null
+$SentinelDir = $sd
+'x' | Set-Content (Join-Path $sd 'run_aaaa')
+'x' | Set-Content (Join-Path $sd 'run_bbbb')
+'x' | Set-Content (Join-Path $sd 'keep_me.txt')
+Check 'clears both stale run_* markers'              (Clear-ObsCrashFlag) 2
+Check 'no run_* markers left'                        @(Get-ChildItem $sd -Filter 'run_*').Count 0
+Check 'unrelated files untouched'                    (Test-Path (Join-Path $sd 'keep_me.txt')) $true
+Check 'nothing to clear -> 0'                        (Clear-ObsCrashFlag) 0
+$SentinelDir = Join-Path $tmp 'does-not-exist'
+Check 'missing sentinel dir -> 0, no error'          (Clear-ObsCrashFlag) 0
+
+'--- quiet runs write nothing ---'
+Remove-Item $LogFile -ErrorAction SilentlyContinue
+$script:obsUp = $true; Save-State (S)
+1..5 | ForEach-Object { Invoke-Watchdog }
+Check 'steady state: no log lines'                   (Test-Path $LogFile) $false
+
+'--- legacy state is migrated and SAVED even when nothing else happens ---'
+$script:obsUp = $true
+Save-State (S '2026-09-24T08:51:41.5000000-04:00')
+Invoke-Watchdog
+Check 'legacy boot persisted in new format'          (Read-State).lastSeenBoot $BOOT
+Remove-Item $LogFile -ErrorAction SilentlyContinue
+Invoke-Watchdog
+Check 'after migration: quiet again'                 (Test-Path $LogFile) $false
+
+Remove-Item $tmp -Recurse -Force
+Remove-Item Env:\OBS_WATCHDOG_STATEDIR
+"`n$($script:pass) passed, $($script:fail) failed"
+if ($script:fail) { exit 1 }
+````
+
+### test-gate.ps1
+
+````powershell
+# Tests for obs-watchdog-gate.vbs. Run:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File test-gate.ps1
+# Uses the gate's test hook: OBS_WATCHDOG_STATEDIR points it at a temp state
+# file, and it exits 10 (skip) or 20 (would run the watchdog) instead of
+# launching anything. Real obs64 presence and real boot time are used, so run
+# this while OBS is open.
+$ErrorActionPreference = 'Stop'
+$gate = Join-Path $PSScriptRoot 'obs-watchdog-gate.vbs'
+$tmp  = Join-Path $env:TEMP ("obs-gate-test-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmp | Out-Null
+$state = Join-Path $tmp 'obs-watchdog-state.json'
+$boot  = [string](Get-WmiObject Win32_OperatingSystem).LastBootUpTime
+$obsUp = [bool](Get-Process obs64 -ErrorAction SilentlyContinue)
+if (-not $obsUp) { 'OBS is not running: start it first (the skip cases need it).'; exit 2 }
+
+$script:pass = 0; $script:fail = 0
+function Gate {
+    $env:OBS_WATCHDOG_STATEDIR = $tmp
+    $p = Start-Process wscript.exe -ArgumentList "`"$gate`"" -Wait -PassThru
+    Remove-Item Env:\OBS_WATCHDOG_STATEDIR
+    switch ($p.ExitCode) { 10 { 'skip' } 20 { 'run' } default { "exit$($p.ExitCode)" } }
+}
+function Case($name, $content, $expect) {
+    Remove-Item $state -Recurse -Force -ErrorAction SilentlyContinue
+    if ($content -eq 'DIR') { New-Item -ItemType Directory $state | Out-Null }
+    elseif ($content -eq 'SAVESTATE') {
+        # Write it exactly the way the watchdog does, to prove the two agree.
+        $env:OBS_WATCHDOG_STATEDIR = $tmp
+        powershell -NoProfile -Command ". '$PSScriptRoot\obs-watchdog-common.ps1'; `$s = New-State; `$s.lastSeenBoot = '$boot'; Save-State `$s"
+        Remove-Item Env:\OBS_WATCHDOG_STATEDIR
+    }
+    elseif ($null -ne $content) { [IO.File]::WriteAllText($state, $content) }
+    $got = Gate
+    if ($got -eq $expect) { $script:pass++; "PASS  $name -> $got" }
+    else { $script:fail++; "FAIL  $name  expected=$expect got=$got" }
+}
+function J($b, $s, $g) { @{ lastSeenBoot = $b; snoozeUntil = $s; graceUntil = $g } | ConvertTo-Json }
+
+Case 'steady state (OBS up, boot handled, no timers)' (J $boot '' '')                 'skip'
+Case 'toast pending'                                  (J $boot '' '2099-01-01T00:00:00') 'run'
+Case 'snoozed'                                        (J $boot '2099-01-01T00:00:00' '') 'run'
+Case 'different boot'                                 (J '20200101000000.000000-240' '' '') 'run'
+Case 'legacy ISO boot format'                         (J '2026-09-24T08:51:41.5000000-04:00' '' '') 'run'
+Case 'no state file'                                  $null                             'run'
+Case 'corrupt state file'                             '{ garbage'                       'run'
+Case 'empty state file'                               ''                                'run'
+Case 'field missing'                                  (@{ lastSeenBoot = $boot } | ConvertTo-Json) 'run'
+Case 'compact JSON (no spaces) still parsed'          ('{"lastSeenBoot":"' + $boot + '","snoozeUntil":"","graceUntil":""}') 'skip'
+Case 'state file is a folder (unreadable)'            'DIR'                             'run'
+Case 'duplicate field'                                ('{"lastSeenBoot":"' + $boot + '","lastSeenBoot":"' + $boot + '","snoozeUntil":"","graceUntil":""}') 'run'
+Case 'real state file written by Save-State'          'SAVESTATE'                       'skip'
+
+Remove-Item $tmp -Recurse -Force
+"`n$($script:pass) passed, $($script:fail) failed"
+if ($script:fail) { exit 1 }
+````
 
 ### test-obs-sort.lua
 
-```lua
+````lua
 -- Tests for obs-replay-flush.lua clip-folder scoring. Run: lua test-obs-sort.lua
 -- No OBS required: the script skips the win32 layer when `obslua` is absent.
 
@@ -900,11 +1473,11 @@ check("same app still wins across toggle", M.folder_for_clip(CLIP), "eldenring")
 
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
-```
+````
 
 ### test-obs-win32.lua
 
-```lua
+````lua
 -- Smoke test for the OBS/win32 branch of obs-replay-flush.lua.
 -- Requires LuaJIT (ffi) on Windows. Stubs the obslua frontend API, then drives
 -- a real save event end to end with the move intercepted.
@@ -925,6 +1498,7 @@ obslua = {
     timer_remove = function() end,
     obs_frontend_replay_buffer_start = function() end,
     obs_frontend_replay_buffer_stop = function() end,
+    obs_frontend_replay_buffer_active = function() return true end,
     obs_frontend_get_replay_buffer_output = function() return nil end,   -- forces the default length
     obs_frontend_get_last_replay = function() return "C:\\Users\\blare\\Videos\\clip.mp4" end,
     obs_frontend_get_last_recording = function() return "C:\\Users\\blare\\Videos\\rec.mp4" end,
@@ -971,11 +1545,11 @@ check("recording event produced a folder", type(moved_to) == "string" and #moved
 
 print(string.format("\n%d passed, %d failed  (foreground was: %s)", pass, fail, exe))
 os.exit(fail == 0 and 0 or 1)
-```
+````
 
 ### test-obs-collision.lua
 
-```lua
+````lua
 -- Regression test: two saves with the same name must both get sorted.
 -- Run: luajit test-obs-collision.lua   (needs ffi, like test-obs-win32.lua)
 local ok_ffi = pcall(require, "ffi")
@@ -1010,4 +1584,143 @@ check("nothing stranded in root",   read(clip) == nil)
 os.execute('rmdir /s /q "' .. root .. '"')
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
-```
+````
+
+### test-obs-keepalive.lua
+
+````lua
+-- Tests for the replay-buffer keep-alive in obs-replay-flush.lua.
+-- Run: lua test-obs-keepalive.lua   (plain Lua; the win32 layer is stubbed)
+-- Drives a fake OBS with a virtual clock and asserts exactly when the script
+-- starts the buffer, and when it must keep its hands off.
+
+local clock = 1000000
+local active = true           -- is the replay buffer running?
+local available = true        -- is the replay buffer enabled in settings?
+local starts, stops = 0, 0
+local timers = {}
+
+obslua = {
+    OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED = 1,
+    OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED = 2,
+    OBS_FRONTEND_EVENT_RECORDING_STARTED = 3,
+    OBS_FRONTEND_EVENT_RECORDING_STOPPED = 4,
+    OBS_FRONTEND_EVENT_EXIT = 5,
+    OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN = 6,
+    obs_frontend_add_event_callback = function() end,
+    timer_add = function(f, ms) timers[f] = ms end,
+    timer_remove = function(f) timers[f] = nil end,
+    obs_frontend_replay_buffer_active = function() return active end,
+    obs_frontend_replay_buffer_start = function() starts = starts + 1; active = true end,
+    obs_frontend_replay_buffer_stop = function() stops = stops + 1; active = false end,
+    obs_frontend_get_replay_buffer_output = function() if available then return {} end return nil end,
+    obs_output_release = function() end,
+    obs_output_get_settings = function() return nil end,
+    obs_frontend_get_last_replay = function() return nil end,
+    obs_frontend_get_last_recording = function() return nil end,
+}
+-- The script only loads its ffi layer when `obslua` is present; stub the one
+-- ffi-backed call the tick needs so this runs under plain Lua.
+package.loaded.ffi = {
+    cdef = function() end,
+    load = function() return {} end,
+    new = function() return {} end,
+    string = function() return "" end,
+}
+
+local dir = arg[0]:match("^(.*)[/\\][^/\\]+$") or "."
+assert(loadfile(dir .. "/obs-replay-flush.lua"))()
+local M = OBS_CLIP_SORT
+M.now = function() return clock end
+M.foreground_info = function() return "FortniteClient-Win64-Shipping", 2.0 end
+M.move_to_folder = function() end
+local K = M.K
+
+local pass, fail = 0, 0
+local function check(name, got, expect)
+    if got == expect then pass = pass + 1; print("PASS  " .. name)
+    else fail = fail + 1; print("FAIL  " .. name .. "  expected=" .. tostring(expect) .. " got=" .. tostring(got)) end
+end
+local function tick(n) for _ = 1, n or 1 do clock = clock + 1; sample_tick() end end
+local function fresh()
+    K.exiting, K.hold_until, K.next_try, K.delay, K.warned = false, 0, 0, 10, nil
+    active, available, starts, stops = true, true, 0, 0
+    script_load(nil)   -- sets loaded_at = now
+end
+
+-- 1) Startup grace: OBS itself starts the buffer ~1 s after load. Don't race it.
+fresh(); active = false
+tick(14)
+check("no start during 15 s startup grace", starts, 0)
+tick(2)
+check("starts once grace is over", starts, 1)
+
+-- 2) Buffer already running: never touched.
+fresh(); tick(120)
+check("running buffer is left alone", starts, 0)
+
+-- 3) Manual stop while OBS is open: back within ~1 s after grace.
+fresh(); tick(20)
+active = false; tick(1)
+check("manual stop -> restarted next tick", starts, 1)
+check("buffer is active again", active, true)
+
+-- 4) Save flush: stop -> STOPPED -> start is the script's own job. Keep-alive
+--    must not add a second start in between.
+fresh(); tick(20)
+on_event(obslua.OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED)
+active = false                                   -- do_stop ran
+on_event(obslua.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED)
+tick(1)                                          -- do_start not fired yet
+check("no keep-alive start during flush", starts, 0)
+do_start()                                       -- the 500 ms timer fires
+check("flush restart happens exactly once", starts, 1)
+tick(10)
+check("still exactly one start after flush", starts, 1)
+
+-- 5) Flush whose STOPPED event never arrives: recovers after the hold.
+fresh(); tick(20)
+on_event(obslua.OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED)
+active = false                                   -- stopped, but no event
+tick(4)
+check("held during flush window", starts, 0)
+tick(2)
+check("stuck flush recovered after hold", starts, 1)
+
+-- 6) OBS exiting: never restart what shutdown stopped.
+fresh(); tick(20)
+on_event(obslua.OBS_FRONTEND_EVENT_EXIT)
+active = false; tick(30)
+check("no restart while OBS is exiting", starts, 0)
+
+-- 7) Replay buffer disabled in settings: don't hammer a missing output.
+fresh(); tick(20)
+available, active = false, false; tick(30)
+check("no start when replay buffer is disabled", starts, 0)
+
+-- 8) Start keeps failing: back off 10, 20, 40 s instead of every second.
+fresh(); tick(20)
+obslua.obs_frontend_replay_buffer_start = function() starts = starts + 1 end  -- stays off
+active = false
+tick(1);  check("first retry immediate", starts, 1)
+tick(9);  check("no retry before 10 s", starts, 1)
+tick(1);  check("second retry at 10 s", starts, 2)
+tick(19); check("no retry before +20 s", starts, 2)
+tick(1);  check("third retry at +20 s", starts, 3)
+obslua.obs_frontend_replay_buffer_start = function() starts = starts + 1; active = true end
+tick(40); check("start succeeds on the next scheduled retry", active, true)
+tick(1);  check("backoff resets once running is observed", K.delay, 10)
+
+-- 9) A fault inside keep-alive must not break focus sampling.
+fresh(); tick(20)
+local saved = obslua.obs_frontend_replay_buffer_active
+obslua.obs_frontend_replay_buffer_active = function() error("boom") end
+M.spans = {}
+local ok = pcall(tick, 5)
+check("tick survives keep-alive error", ok, true)
+check("focus still recorded", #M.spans > 0, true)
+obslua.obs_frontend_replay_buffer_active = saved
+
+print(string.format("\n%d passed, %d failed", pass, fail))
+os.exit(fail == 0 and 0 or 1)
+````

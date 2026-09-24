@@ -83,9 +83,13 @@ Measured on your machine with `bench-focus-probe.cs` and the Lua timing tests:
 
 ```
 cd C:\Users\blare\Scripts
-lua    test-obs-sort.lua     # 19 scoring cases, no OBS needed      -> 19 passed (run 2026-09-24)
-luajit test-obs-win32.lua    # real win32 probe + stubbed OBS API   -> 7 passed  (run 2026-09-24)
+lua    test-obs-sort.lua       # 19 scoring cases, no OBS needed      -> 19 passed (run 2026-09-24)
+luajit test-obs-win32.lua      # real win32 probe + stubbed OBS API   -> 7 passed  (run 2026-09-24)
+luajit test-obs-collision.lua  # same-name saves get (2), (3)         -> 4 passed  (run 2026-09-24)
+lua    test-obs-keepalive.lua  # buffer keep-alive timing/guards      -> 21 passed (run 2026-09-24)
 ```
+
+Since 2026-09-24 the same Lua script also **keeps the replay buffer running** while OBS is open (it replaced the old outside websocket check). It rides the same 1 Hz tick, stays hands-off for 15 s after load, during the post-save flush and while OBS exits, and backs off 10 s, 20 s, 40 s... if a start fails. Measured live: a stopped buffer was running again after 1.3 s. Full setup: `OBS-REBUILD-FROM-SCRATCH.md`.
 
 The scoring half of the Lua file is written as pure functions and exported as the global `OBS_CLIP_SORT`, and it skips the win32/ffi code when `obslua` isn't present. That's what lets the tests run in plain Lua with no OBS.
 

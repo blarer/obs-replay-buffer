@@ -1,0 +1,66 @@
+---
+config:
+  theme: base
+  themeVariables:
+    fontFamily: Segoe UI, Arial
+    fontSize: 15px
+    primaryColor: "#eef4ff"
+    primaryBorderColor: "#4a6fa5"
+    lineColor: "#4a6fa5"
+---
+flowchart TD
+    subgraph A ["1. EVERY MINUTE: Windows checks on OBS (Task Scheduler)"]
+        direction TB
+        T1["Task Scheduler<br/>at logon + every 1 min"] --> G{"obs-watchdog-gate.vbs<br/>OBS running AND nothing pending?"}
+        G -->|"yes, about 99.9% of runs<br/>~30 ms CPU"| Q1["exit, nothing to do"]
+        G -->|"no, or any error"| W["obs-replay-watchdog.ps1<br/>~280 ms CPU, only when needed"]
+        W --> D1{"OBS running?"}
+        D1 -->|yes| U["update state, remove old toast"]
+        D1 -->|no| D2{"first run since boot?"}
+        D2 -->|yes| L1["launch OBS silently"]
+        D2 -->|no| D3{"Stay off pressed?"}
+        D3 -->|"yes, under 5 min"| Q2["wait"]
+        D3 -->|no| D4{"toast already shown?"}
+        D4 -->|"no, OBS just closed"| TO["save 5 min timer, then show toast"]
+        D4 -->|"yes, under 5 min"| Q3["wait"]
+        D4 -->|"yes, 5 min passed"| L2["relaunch OBS"]
+    end
+
+    subgraph B ["2. TOAST BUTTONS"]
+        direction TB
+        TO -.-> BT1["Relaunch now"]
+        TO -.-> BT2["Stay off 5 min"]
+        TO -.-> BT3["X or ignore"]
+        BT1 --> L3["launch OBS now"]
+        BT2 --> SN["quiet for 5 min, then toast again"]
+        BT3 -->|"after the 5 min timer"| L2
+    end
+
+    subgraph C ["3. EVERY LAUNCH"]
+        direction TB
+        L1 --> CL["delete leftover crash markers<br/>so no Safe Mode popup"]
+        L2 --> CL
+        L3 --> CL
+        CL --> OB["obs64 --startreplaybuffer --minimize-to-tray"]
+    end
+
+    subgraph D ["4. INSIDE OBS: obs-replay-flush.lua, every 1 second"]
+        direction TB
+        OB --> TK["which window is in front?<br/>~0.008 microseconds"]
+        TK --> KA{"replay buffer on?"}
+        KA -->|yes| OK["nothing"]
+        KA -->|"no, and not mid-save"| RS["start it again<br/>measured: back in 1.3 s"]
+    end
+
+    subgraph E ["5. ALT+Z SAVE"]
+        direction TB
+        SV["Alt+Z"] --> SC["folder = app in front<br/>longest during the clip"]
+        SC --> MV["move to Videos\GameName\<br/>adds (2) if name taken"]
+        MV --> FL["restart buffer once<br/>so next clip has no repeat"]
+    end
+    TK -.-> SC
+
+    ST[("obs-watchdog-state.json<br/>boot, toast timer, snooze")]
+    LG[("obs-watchdog.log<br/>one line per real action")]
+    W -.-> ST
+    W -.-> LG

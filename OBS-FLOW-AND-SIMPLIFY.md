@@ -1,5 +1,7 @@
 # OBS Clip System: Flow + Simplification Brainstorm
 
+> **SUPERSEDED 2026-09-24.** Parts of this file describe the OLD design (websocket buffer check, `run-hidden.vbs` as the task action, `--disable-shutdown-check`). The current, tested setup is in **OBS-REBUILD-FROM-SCRATCH.md** (flow chart: `OBS-flow.png` / `OBS-flow.mmd`). Kept for history only.
+
 All costs below were measured on this PC on 2026-09-24 unless marked otherwise.
 
 ## 1. The whole flow
