@@ -231,9 +231,22 @@ M.move_to_folder = function(path, folder)
     if not dir then return end
     local target = dir .. "\\" .. folder
     kernel32.CreateDirectoryA(target, nil)   -- no-op if it exists
-    local ok, err = os.rename(path, target .. "\\" .. file)
+    -- os.rename fails if the destination exists (two saves with the same
+    -- timestamp-derived name), which used to strand the clip in Videos\.
+    -- Pick a free name instead: "clip (2).mp4", "clip (3).mp4", ...
+    local stem, ext = file:match("^(.*)(%.[^.]+)$")
+    if not stem then stem, ext = file, "" end
+    local name, n = file, 1
+    while true do
+        local fh = io.open(target .. "\\" .. name, "rb")
+        if not fh then break end
+        fh:close()
+        n = n + 1
+        name = stem .. " (" .. n .. ")" .. ext
+    end
+    local ok, err = os.rename(path, target .. "\\" .. name)
     if ok then
-        print("sorted -> " .. folder .. "\\" .. file)
+        print("sorted -> " .. folder .. "\\" .. name)
     else
         print("move failed: " .. tostring(err))
     end

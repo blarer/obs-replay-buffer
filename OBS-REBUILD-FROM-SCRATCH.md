@@ -111,7 +111,7 @@ Create `C:\Users\<user>\Scripts\` and write these files exactly as in the Append
 - `obs-replay-watchdog.ps1`
 - `obs-watchdog-action.ps1`
 - `obs-replay-flush.lua`
-- optional tests: `test-obs-sort.lua`, `test-obs-win32.lua`
+- optional tests: `test-obs-sort.lua`, `test-obs-win32.lua`, `test-obs-collision.lua`
 
 `obs-watchdog-state.json` is created automatically. Do not create it by hand.
 
@@ -166,7 +166,7 @@ Alternatively import the exported definition: `schtasks /create /tn "OBS Replay 
 4. Close OBS -> within 1 minute a toast appears. Click **Stay off 5 min** -> `obs-watchdog-state.json` shows `snoozeUntil` about 5 min ahead. (Confirmed working on the original machine 2026-09-24 10:32.)
 5. Close OBS and ignore the toast -> about 5-6 minutes later OBS relaunches on its own.
 6. Stop the replay buffer manually inside OBS -> within 1 minute it is running again.
-7. `lua test-obs-sort.lua` -> `19 passed, 0 failed`. `luajit test-obs-win32.lua` -> `7 passed, 0 failed`. (Install with `scoop install lua luajit`.)
+7. `lua test-obs-sort.lua` -> `19 passed, 0 failed`. `luajit test-obs-win32.lua` -> `7 passed, 0 failed`. `luajit test-obs-collision.lua` -> `4 passed, 0 failed` (same-name saves get ` (2)`, ` (3)` instead of being stranded). (Install with `scoop install lua luajit`.)
 
 ---
 
@@ -689,9 +689,22 @@ M.move_to_folder = function(path, folder)
     if not dir then return end
     local target = dir .. "\\" .. folder
     kernel32.CreateDirectoryA(target, nil)   -- no-op if it exists
-    local ok, err = os.rename(path, target .. "\\" .. file)
+    -- os.rename fails if the destination exists (two saves with the same
+    -- timestamp-derived name), which used to strand the clip in Videos\.
+    -- Pick a free name instead: "clip (2).mp4", "clip (3).mp4", ...
+    local stem, ext = file:match("^(.*)(%.[^.]+)$")
+    if not stem then stem, ext = file, "" end
+    local name, n = file, 1
+    while true do
+        local fh = io.open(target .. "\\" .. name, "rb")
+        if not fh then break end
+        fh:close()
+        n = n + 1
+        name = stem .. " (" .. n .. ")" .. ext
+    end
+    local ok, err = os.rename(path, target .. "\\" .. name)
     if ok then
-        print("sorted -> " .. folder .. "\\" .. file)
+        print("sorted -> " .. folder .. "\\" .. name)
     else
         print("move failed: " .. tostring(err))
     end
@@ -956,5 +969,44 @@ on_event(obslua.OBS_FRONTEND_EVENT_RECORDING_STOPPED)
 check("recording event produced a folder", type(moved_to) == "string" and #moved_to > 0, moved_to)
 
 print(string.format("\n%d passed, %d failed  (foreground was: %s)", pass, fail, exe))
+os.exit(fail == 0 and 0 or 1)
+```
+
+### test-obs-collision.lua
+
+```lua
+-- Regression test: two saves with the same name must both get sorted.
+-- Run: luajit test-obs-collision.lua   (needs ffi, like test-obs-win32.lua)
+local ok_ffi = pcall(require, "ffi")
+if not ok_ffi then print("SKIP: needs LuaJIT"); os.exit(0) end
+
+obslua = {
+    obs_frontend_add_event_callback = function() end,
+    timer_add = function() end, timer_remove = function() end,
+}
+local dir = arg[0]:match("^(.*)[/\\][^/\\]+$") or "."
+assert(loadfile(dir .. "/obs-replay-flush.lua"))()
+local M = OBS_CLIP_SORT
+
+local root = os.getenv("TEMP") .. "\\obs-collision-" .. os.time()
+os.execute('mkdir "' .. root .. '"')
+local function write(p, s) local f = assert(io.open(p, "wb")); f:write(s); f:close() end
+local function read(p) local f = io.open(p, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
+
+local pass, fail = 0, 0
+local function check(name, cond) if cond then pass = pass + 1; print("PASS  " .. name) else fail = fail + 1; print("FAIL  " .. name) end end
+
+local clip = root .. "\\rb Sep 21 09.14 PM.mp4"
+write(clip, "first");  M.move_to_folder(clip, "Game")
+write(clip, "second"); M.move_to_folder(clip, "Game")
+write(clip, "third");  M.move_to_folder(clip, "Game")
+
+check("first keeps original name",  read(root .. "\\Game\\rb Sep 21 09.14 PM.mp4") == "first")
+check("second gets (2)",            read(root .. "\\Game\\rb Sep 21 09.14 PM (2).mp4") == "second")
+check("third gets (3)",             read(root .. "\\Game\\rb Sep 21 09.14 PM (3).mp4") == "third")
+check("nothing stranded in root",   read(clip) == nil)
+
+os.execute('rmdir /s /q "' .. root .. '"')
+print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
 ```

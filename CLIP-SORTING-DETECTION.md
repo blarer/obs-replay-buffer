@@ -72,7 +72,11 @@ Measured on your machine with `bench-focus-probe.cs` and the Lua timing tests:
 
 - **Terminals, browsers and IDEs count as `content`.** Your Sep 13 test clip went to `Videos\claude\` because the Claude terminal had focus. If that bothers you, add those exe names to `OVERLAY_APPS`.
 - The fullscreen check only compares against the **primary** monitor.
-- **Confirmed bug: two saves in the same minute collide.** `FilenameFormatting=%b %d %I.%M %p` only goes down to the minute, so two Alt+Z presses within one minute both produce `rb Sep 21 09.14 PM.mp4`. The first one moves fine. For the second, `os.rename` refuses to overwrite, so it stays in `Videos\` root and `move failed` shows up in the script log. Verified 2026-09-24: `Videos\rb Sep 21 09.14 PM.mp4` (163 MB) is stuck in root, and a different 994 MB file with the same name is in `FortniteClient-Win64-Shipping\`. Fix: add seconds to the filename format (`%b %d %I.%M.%S %p`), or have `M.move_to_folder` add a ` (2)` suffix when the target exists.
+- **Fixed 2026-09-24: two saves in the same minute used to collide.** `FilenameFormatting=%b %d %I.%M %p` only goes down to the minute, so two Alt+Z presses within one minute both produce `rb Sep 21 09.14 PM.mp4`. The first moved fine. For the second, `os.rename` refused to overwrite, so the clip stayed in `Videos\` root with `move failed ... File exists` in the script log. Evidence: `Videos\rb Sep 21 09.14 PM.mp4` (163 MB, 9:14:47) was stuck in root, and a different 994 MB file with the same name (9:14:04) is in `FortniteClient-Win64-Shipping\`.
+  - **Fix:** `M.move_to_folder` now picks a free name before moving: `clip.mp4`, then `clip (2).mp4`, `clip (3).mp4`, and so on. Nothing is ever overwritten, and the OBS filename format does not need to change.
+  - **Proof:** `luajit test-obs-collision.lua` saves three same-named clips in a temp folder. Before the fix: 1 passed, 3 failed, with the exact `File exists` error. After the fix: 4 passed, 0 failed. The other two suites still pass (19/19 and 7/7).
+  - The fix only affects **new** saves. The stuck `Videos\rb Sep 21 09.14 PM.mp4` has to be moved by hand to `FortniteClient-Win64-Shipping\rb Sep 21 09.14 PM (2).mp4`.
+  - Optional: adding seconds to the format (`%b %d %I.%M.%S %p`) also stops the collisions and makes names sort by time more precisely. It is not needed anymore.
 - Folder names are raw exe names, and there's no title mapping.
 
 ### Tests
