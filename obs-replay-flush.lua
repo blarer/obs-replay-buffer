@@ -192,6 +192,12 @@ M.now = function() return os.time() end
 function sample_tick()
     local exe, weight = M.foreground_info()
     M.record(exe, weight, M.now())
+    if obs then
+        -- Isolated so a keep-alive fault can never stop focus sampling.
+        -- (M.K, not K: the local K is declared further down.)
+        local ok, err = pcall(M.keepalive)
+        if not ok and not M.K.warned then M.K.warned = true; print("keep-alive error: " .. tostring(err)) end
+    end
 end
 
 -- Folder for a clip covering the last `seconds`, with live-probe fallback.
@@ -208,6 +214,54 @@ end
 
 local restarting = false
 local rec_start_t = nil
+
+-- ------------------------------------------------ replay buffer keep-alive ---
+-- The buffer must always be running while OBS is open. This replaces the old
+-- external obs-websocket check: it rides the existing 1 Hz sample timer, so it
+-- costs one boolean call per second.
+--
+-- It stays hands-off when a stop is expected:
+--   * first STARTUP_GRACE s after load (OBS starts the buffer itself via
+--     --startreplaybuffer about 1 s after scripts load)
+--   * during the post-save flush (stop -> STOPPED event -> start)
+--   * once OBS is exiting
+-- A failing start (e.g. encoder error) makes OBS show an error dialog, so
+-- retries back off 10 s, 20 s, 40 s ... up to 5 min, and reset once the
+-- buffer is seen running again.
+
+local STARTUP_GRACE = 15
+local FLUSH_HOLD = 5
+local RETRY_MIN, RETRY_MAX = 10, 300
+
+local K = { loaded_at = 0, hold_until = 0, next_try = 0, delay = RETRY_MIN, exiting = false }
+M.K = K
+
+local function buffer_available()
+    local out = obs.obs_frontend_get_replay_buffer_output()
+    if out == nil then return false end   -- replay buffer disabled in settings
+    obs.obs_output_release(out)
+    return true
+end
+
+function M.keepalive()
+    local now = M.now()
+    if K.exiting or now < K.loaded_at + STARTUP_GRACE then return end
+
+    if obs.obs_frontend_replay_buffer_active() then
+        K.delay, K.next_try = RETRY_MIN, 0
+        return
+    end
+    if now < K.hold_until then return end
+    -- The flush never saw its STOPPED event: drop the flag so a later
+    -- manual stop isn't mistaken for a flush.
+    restarting = false
+    if now < K.next_try or not buffer_available() then return end
+
+    print("keep-alive: replay buffer was off, starting it")
+    obs.obs_frontend_replay_buffer_start()
+    K.next_try = now + K.delay
+    K.delay = math.min(K.delay * 2, RETRY_MAX)
+end
 
 local function replay_seconds()
     local ok, secs = pcall(function()
@@ -269,10 +323,15 @@ function on_event(event)
         M.move_to_folder(obs.obs_frontend_get_last_replay(),
                          M.folder_for_clip(replay_seconds()))
         restarting = true
+        K.hold_until = M.now() + FLUSH_HOLD
         obs.timer_add(do_stop, 100)
     elseif event == obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED and restarting then
         restarting = false
+        K.hold_until = M.now() + FLUSH_HOLD   -- do_start fires in 500 ms
         obs.timer_add(do_start, 500)
+    elseif event == obs.OBS_FRONTEND_EVENT_EXIT
+        or event == obs.OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN then
+        K.exiting = true
     elseif event == obs.OBS_FRONTEND_EVENT_RECORDING_STARTED then
         rec_start_t = M.now()
     elseif event == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED then
@@ -284,6 +343,7 @@ end
 
 function script_load(settings)
     obs.obs_frontend_add_event_callback(on_event)
+    K.loaded_at = M.now()
     obs.timer_add(sample_tick, SAMPLE_MS)
     sample_tick()
     print("replay-flush + smart game-sort loaded")
@@ -294,7 +354,8 @@ function script_unload()
 end
 
 function script_description()
-    return "Flush the replay buffer after each save (no overlap) and sort clips/recordings " ..
-           "into per-game folders using the app that held focus for most of the clip " ..
+    return "Flush the replay buffer after each save (no overlap), keep the replay buffer " ..
+           "running while OBS is open, and sort clips/recordings into per-game folders " ..
+           "using the app that held focus for most of the clip " ..
            "(ignores Discord/Steam/shell pass-throughs)."
 end

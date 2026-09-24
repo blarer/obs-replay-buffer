@@ -18,6 +18,7 @@ obslua = {
     timer_remove = function() end,
     obs_frontend_replay_buffer_start = function() end,
     obs_frontend_replay_buffer_stop = function() end,
+    obs_frontend_replay_buffer_active = function() return true end,
     obs_frontend_get_replay_buffer_output = function() return nil end,   -- forces the default length
     obs_frontend_get_last_replay = function() return "C:\\Users\\blare\\Videos\\clip.mp4" end,
     obs_frontend_get_last_recording = function() return "C:\\Users\\blare\\Videos\\rec.mp4" end,
