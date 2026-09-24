@@ -1,1 +1,4 @@
 obs-watchdog-state.json
+obs-watchdog-state.json.tmp
+obs-watchdog.log
+obs-watchdog.log.1

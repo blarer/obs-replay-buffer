@@ -40,7 +40,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>wscript.exe</Command>
-      <Arguments>"C:\Users\blare\Scripts\run-hidden.vbs" "C:\Users\blare\Scripts\obs-replay-watchdog.ps1"</Arguments>
+      <Arguments>"C:\Users\blare\Scripts\obs-watchdog-gate.vbs"</Arguments>
     </Exec>
   </Actions>
 </Task>
