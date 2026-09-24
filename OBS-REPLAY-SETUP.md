@@ -18,7 +18,8 @@ Goal: the replay buffer is **always running** so a clip is never missed, and sav
 | `C:\Users\blare\Scripts\test-obs-sort.lua`, `test-obs-win32.lua` | Test harness for the pure scoring half, runs under plain Lua with no OBS. |
 | Scheduled task `\OBS Replay Buffer Watchdog` | Runs the watchdog. |
 | `HKCR\obs-watchdog` | URL protocol backing the toast buttons. |
-| OBS profile `GameRec-AV1` (dir `GameRecAV1`) | Recording / replay-buffer settings. |
+| OBS profile `GameRec-AV1` (**live dir is `GameRecAV1`**) | Recording / replay-buffer settings. |
+| `basic\profiles\GameRec-AV1\` | **Stale leftover dir** from 2026-07-04, contains only an old `recordEncoder.json`. OBS does not read it. Ignore it. |
 
 ---
 
@@ -109,14 +110,18 @@ The scoring half is pure and exported as `OBS_CLIP_SORT` for the offline test ha
 
 ## 6. OBS profile `GameRec-AV1`
 
-Active profile: `user.ini -> Profile=GameRec-AV1`, `ProfileDir=GameRecAV1`. Scene collection `Untitled`.
+Active profile: `user.ini -> Profile=GameRec-AV1`, **`ProfileDir=GameRecAV1`**. Scene collection `Untitled`.
+
+Trap: there are two similarly named directories under `basic\profiles\`. Only `GameRecAV1` is live (its `basic.ini` is rewritten by OBS on every launch). `GameRec-AV1` is an orphan from the original July 4 build and holds a stale encoder file. Edit the wrong one and nothing happens.
 
 ```
 Output mode:      Advanced
 Video:            2560x1440 base and output, 60 fps, lanczos, NV12 / 709 / Partial
 Record encoder:   obs_nvenc_av1_tex  (NVENC AV1)
-Encoder settings: CQP 20, preset p7, tune hq, multipass disabled,
-                  profile main, keyint 2 s, bf 2, lookahead off, AQ on
+Encoder settings: CQP 20, preset2 p7 (+ legacy "preset":"p5" key), tune hq,
+                  multipass disabled, profile main, keyint 2 s, bf 2,
+                  lookahead off, AQ on
+                  (from GameRecAV1\recordEncoder.json, last changed 2026-09-22)
 Container:        hybrid_mp4
 Path:             C:\Users\blare\Videos
 Replay buffer:    RecRB=true, RecRBTime=600 (10 min), RecRBSize=4096 MB, prefix "rb"
@@ -128,13 +133,28 @@ Note `RecSplitFileTime=15` / `RecSplitFileType=Time` applies to normal recording
 
 ---
 
-## 7. Known trade-off
+## 7. Verified live state (2026-09-24)
+
+Every item below was observed, not inferred:
+
+- Task state `Ready`, `LastTaskResult 0`, last run 10:24, next run 10:25 -> the 1-minute loop is healthy.
+- `obs64` PID 2384, started 08:58, about 7 min after the 08:51 boot -> the logon-trigger silent launch path works.
+- `obs-watchdog-state.json` `lastSeenBoot` exactly matches `Win32_OperatingSystem.LastBootUpTime`, snooze and grace both empty -> normal steady state.
+- obs-websocket config: `server_enabled true`, `auth_required true`, `server_port 4455` -> matches what the watchdog assumes.
+- Scene collection `Untitled.json` loads exactly one script: `C:/Users/blare/Scripts/obs-replay-flush.lua`.
+- Sorting demonstrably works: `Videos\FortniteClient-Win64-Shipping\` holds recent clips (`rb Sep 23 10.08 PM.mp4`), while only one stray `rb Sep 21 09.14 PM.mp4` sits unsorted in `Videos\` root.
+- Folders are named by **executable**, so Fortnite lands in `FortniteClient-Win64-Shipping`, not a pretty title. `Videos\Captures` is an empty Windows default, unrelated.
+- Some clips carry a `_trim_198-599` suffix, from the separate `mp4trim` project, not from this setup.
+
+---
+
+## 8. Known trade-off
 
 The buffer runs **24/7**, which a Sep 2026 optimization pass flagged as the top A/B candidate for Fortnite 1% lows (it holds an NVENC session open permanently). Decision at the time: **keep it**, clipping is worth more than the margin. If chasing frames, toggle the scheduled task off and A/B it rather than deleting anything.
 
 ---
 
-## 8. Operations cheat sheet
+## 9. Operations cheat sheet
 
 ```powershell
 # is it alive
@@ -159,7 +179,7 @@ Reload the Lua after editing: OBS -> Tools -> Scripts -> `obs-replay-flush.lua` 
 
 ---
 
-## 9. History
+## 10. History
 
 - 2026-07-04 - built: watchdog, action handler, protocol, task, Lua flush script.
 - 2026-08-05/06 - Lua rewritten from single-snapshot focus to the 1 Hz weighted sampler with RLE spans and the pure test harness (jcode session `fish`, `session_fish_1785979654114_792b3c6649dbb3c3`).
