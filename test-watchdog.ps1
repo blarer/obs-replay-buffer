@@ -45,6 +45,21 @@ Check 'garbage timer -> toast (self-heals)'          (D (S $BOOT 'not-a-date' 'j
 Check 'decision does not mutate input'               ($(
         $in = S $BOOT '' $later; $null = D $in $true; $in.graceUntil)) $later
 
+'--- restart requested by Lua (replay buffer cannot start) ---'
+function DR($state, $now = $NOW) {
+    Get-WatchdogDecision -State $state -Boot $BOOT -ObsRunning $true -Now $now -RestartRequested $true
+}
+$r0 = S; $r1 = S; $r1.restarts = '1'; $r2 = S; $r2.restarts = '2'
+$rOld = S $BOOT2; $rOld.restarts = '2'
+Check 'request, first time -> restart-obs'           (DR $r0).Action 'restart-obs'
+Check 'request counts restarts'                      (DR $r0).State.restarts '1'
+Check 'request, second time -> restart-obs'          (DR $r1).Action 'restart-obs'
+Check 'request after cap -> restart-giveup'          (DR $r2).Action 'restart-giveup'
+Check 'cap resets on a new boot'                     (DR $rOld).Action 'restart-obs'
+Check 'new boot restart count starts at 1'           (DR $rOld).State.restarts '1'
+Check 'no request -> unchanged behavior'             (D $r2 $true).Action 'none'
+Check 'request ignored while OBS is off'             (Get-WatchdogDecision -State (S) -Boot $BOOT -ObsRunning $false -Now $NOW -RestartRequested $true).Action 'toast'
+
 '--- legacy boot format migration ---'
 $legacy = S '2026-09-24T08:51:41.5000000-04:00'
 Check 'old ISO boot of SAME boot is migrated'        (Update-LegacyBoot $legacy $BOOT).lastSeenBoot $BOOT
@@ -57,7 +72,10 @@ $script:toastThrows = $false
 function Get-Now { $script:clock }
 function Get-BootId { $BOOT }
 function Test-ObsRunning { $script:obsUp }
-function Start-Obs { $script:launches++; $script:obsUp = $true }
+function Start-Obs { $script:launches++; $script:obsUp = $true; Clear-RestartRequest }
+function Stop-Obs { $script:stops++; $script:obsUp = $false }
+function Show-Notice { $script:notices++ }
+$script:stops = 0; $script:notices = 0
 function Show-Toast { if ($script:toastThrows) { throw 'toast subsystem broken' }; $script:toasts++ }
 function Remove-Toast { }
 
@@ -129,6 +147,39 @@ Check 'legacy boot persisted in new format'          (Read-State).lastSeenBoot $
 Remove-Item $LogFile -ErrorAction SilentlyContinue
 Invoke-Watchdog
 Check 'after migration: quiet again'                 (Test-Path $LogFile) $false
+
+'--- restart request through the runner ---'
+$script:obsUp = $true; $script:launches = 0; $script:stops = 0; $script:notices = 0
+$script:clock = Get-Date   # request-age check compares to the file's real mtime
+Save-State (S)
+'x' | Set-Content $RequestFile
+Invoke-Watchdog
+Check 'fresh request (<5 s) is not trusted yet'      "$($script:stops)/$($script:launches)" '0/0'
+(Get-Item $RequestFile).LastWriteTime = (Get-Date).AddSeconds(-30)
+Invoke-Watchdog
+Check 'request: OBS stopped and relaunched'          "$($script:stops)/$($script:launches)" '1/1'
+Check 'request: restart counted'                     (Read-State).restarts '1'
+Check 'request: logged'                              ([bool](Select-String -Path $LogFile -Pattern 'restarted OBS \(1/2' -Quiet)) $true
+'x' | Set-Content $RequestFile; (Get-Item $RequestFile).LastWriteTime = (Get-Date).AddSeconds(-30)
+Invoke-Watchdog
+'x' | Set-Content $RequestFile; (Get-Item $RequestFile).LastWriteTime = (Get-Date).AddSeconds(-30)
+Invoke-Watchdog
+Check 'third request this boot: no third restart'    "$($script:stops)/$($script:launches)" '2/2'
+Check 'gave up: user notified once'                  $script:notices 1
+Check 'gave up: request file removed'                (Test-Path $RequestFile) $false
+Invoke-Watchdog
+Check 'after giving up: quiet again'                 "$($script:stops)/$($script:notices)" '2/1'
+
+'--- NVENC readiness wait ---'
+$script:waits = 0; $script:nvencOkAfter = 2; $script:nvencCalls = 0
+function Test-NvencReady { $script:nvencCalls++; $script:nvencCalls -gt $script:nvencOkAfter }
+function Wait-Seconds([int]$n) { $script:waits += $n }
+Check 'NVENC ready after 2 failed checks -> waited 10 s' (Wait-NvencReady) 10
+$script:nvencCalls = 0; $script:nvencOkAfter = 0; $script:waits = 0
+Check 'NVENC ready at once -> no wait'               (Wait-NvencReady) 0
+$script:nvencCalls = 0; $script:nvencOkAfter = 1000; $script:waits = 0
+Check 'NVENC never ready -> -1 (launch anyway)'      (Wait-NvencReady) -1
+Check 'NVENC never ready -> bounded wait'            $script:waits $NvencWaitSec
 
 Remove-Item $tmp -Recurse -Force
 Remove-Item Env:\OBS_WATCHDOG_STATEDIR

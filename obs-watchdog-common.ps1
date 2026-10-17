@@ -10,15 +10,27 @@
 #   graceUntil    set when the "OBS closed" toast is shown. When it passes
 #                 with no answer, OBS is relaunched.
 #   snoozeUntil   set by the "Stay off 5 min" button.
+#   restarts      OBS restarts done this boot because obs-replay-flush.lua
+#                 asked for one (replay buffer kept failing to start).
+#
+# obs-restart-request (file, written by obs-replay-flush.lua) means: OBS is
+# running but its replay buffer can't start, please restart OBS. Seen
+# 2026-10-17: NVENC failed to load at launch, so the encoder didn't exist.
 
 $WatchdogDir = if ($env:OBS_WATCHDOG_STATEDIR) { $env:OBS_WATCHDOG_STATEDIR } else { $PSScriptRoot }
 $StateFile   = Join-Path $WatchdogDir 'obs-watchdog-state.json'
 $LogFile     = Join-Path $WatchdogDir 'obs-watchdog.log'
+$RequestFile = Join-Path $WatchdogDir 'obs-restart-request'
 
 $ObsExe        = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
 $ObsDir        = Split-Path $ObsExe
+$NvencTest     = Join-Path $ObsDir 'obs-nvenc-test.exe'
 $GraceMinutes  = 5
 $SnoozeMinutes = 5
+$MaxRestarts   = 2       # per boot, so a broken setup can't restart-loop
+$NvencWaitSec  = 60      # max wait for NVENC before launching anyway. Keep
+                         # waits + test timeouts + Stop-Obs under the task's
+                         # 3 min ExecutionTimeLimit (worst case ~150 s).
 $LogMaxBytes   = 256KB
 # Toasts need an AppID Windows already knows. This is PowerShell's own.
 $ToastAppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
@@ -31,6 +43,54 @@ function Get-Now { Get-Date }
 function Get-BootId { [string](Get-WmiObject Win32_OperatingSystem).LastBootUpTime }
 
 function Test-ObsRunning { [bool](Get-Process obs64 -ErrorAction SilentlyContinue) }
+
+# The Lua deletes the request within ~1 s if the start it made right after
+# writing it succeeded, so only trust a request that has stood for 5 s.
+function Test-RestartRequested {
+    $f = Get-Item $RequestFile -ErrorAction SilentlyContinue
+    [bool]($f -and ((Get-Now) - $f.LastWriteTime).TotalSeconds -ge 5)
+}
+
+function Clear-RestartRequest { Remove-Item $RequestFile -Force -ErrorAction SilentlyContinue }
+
+function Wait-Seconds([int]$n) { Start-Sleep -Seconds $n }
+
+# OBS checks NVENC once, at startup, by running obs-nvenc-test.exe. If that
+# fails (driver still settling after boot) NVENC stays off until OBS restarts,
+# and the AV1 replay buffer can never start. Run the same test first.
+function Test-NvencReady {
+    if (-not (Test-Path $NvencTest)) { return $true }   # can't check: don't block
+    try {
+        $psi = New-Object Diagnostics.ProcessStartInfo $NvencTest
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.CreateNoWindow = $true
+        $p = [Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEndAsync()
+        if (-not $p.WaitForExit(5000)) { try { $p.Kill() } catch {}; return $false }
+        return [bool]($out.Result -match 'nvenc_supported=true')
+    } catch { return $true }
+}
+
+# Returns seconds waited, or -1 if NVENC never became ready.
+function Wait-NvencReady {
+    $waited = 0
+    while (-not (Test-NvencReady)) {
+        if ($waited -ge $NvencWaitSec) { return -1 }
+        Wait-Seconds 5; $waited += 5
+    }
+    $waited
+}
+
+# Polite close first (lets OBS save and remove its crash marker), then force.
+function Stop-Obs {
+    $p = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+    if (-not $p) { return }
+    & taskkill.exe /im obs64.exe *> $null
+    try { $p | Wait-Process -Timeout 15 -ErrorAction Stop }
+    catch { Get-Process obs64 -ErrorAction SilentlyContinue | Stop-Process -Force }
+    Start-Sleep -Seconds 2
+}
 
 # OBS 32 marks a running instance with a file in .sentinel and deletes it on a
 # clean exit. A leftover file (crash, force-kill, power loss, forced update
@@ -52,6 +112,10 @@ function Clear-ObsCrashFlag {
 
 function Start-Obs {
     if (Test-ObsRunning) { return }   # never start a second instance
+    Clear-RestartRequest              # belongs to the OBS that is gone
+    $w = Wait-NvencReady
+    if ($w -lt 0) { Write-Log 'launch' "NVENC still not ready after $NvencWaitSec s: launching anyway" }
+    elseif ($w -gt 0) { Write-Log 'launch' "waited $w s for NVENC to be ready" }
     $n = Clear-ObsCrashFlag
     if ($n) { Write-Log 'launch' "OBS last exited uncleanly: cleared $n crash marker(s) so it starts without the Safe Mode prompt" }
     Start-Process -FilePath $ObsExe -WorkingDirectory $ObsDir `
@@ -91,6 +155,20 @@ function Remove-Toast {
     } catch {}
 }
 
+# Plain notice, no buttons. Used when automatic recovery has given up.
+function Show-Notice([string]$Title, [string]$Body) {
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
+    $doc = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $doc.LoadXml("<toast><visual><binding template='ToastGeneric'><text></text><text></text></binding></visual></toast>")
+    $t = $doc.GetElementsByTagName('text')
+    $null = $t.Item(0).AppendChild($doc.CreateTextNode($Title))
+    $null = $t.Item(1).AppendChild($doc.CreateTextNode($Body))
+    $toast = New-Object Windows.UI.Notifications.ToastNotification($doc)
+    $toast.Tag = 'obs-notice'; $toast.Group = 'obs-watchdog'
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($ToastAppId).Show($toast)
+}
+
 # ---------------------------------------------------------------- logging ---
 # One line per real action. Quiet runs write nothing. Rotates at 256 KB.
 
@@ -106,7 +184,7 @@ function Write-Log([string]$Source, [string]$Message) {
 
 # ------------------------------------------------------------------ state ---
 
-function New-State { [ordered]@{ lastSeenBoot = ''; snoozeUntil = ''; graceUntil = '' } }
+function New-State { [ordered]@{ lastSeenBoot = ''; snoozeUntil = ''; graceUntil = ''; restarts = '' } }
 
 function Read-State {
     $s = New-State
@@ -186,6 +264,8 @@ function Update-LegacyBoot($State, [string]$Boot) {
 # Returns @{ Action = ...; State = <new state> }.
 #
 #   OBS running:
+#     restart requested by Lua         -> restart-obs, or restart-giveup
+#                                          once $MaxRestarts were done this boot
 #     state already current            -> none
 #     otherwise (new boot / timers set) -> running-update, or
 #                                          running-clear-toast if a toast was pending
@@ -196,12 +276,20 @@ function Update-LegacyBoot($State, [string]$Boot) {
 #     toast pending, grace over        -> relaunch-grace
 #     otherwise (just closed)          -> toast
 function Get-WatchdogDecision {
-    param($State, [string]$Boot, [bool]$ObsRunning, [datetime]$Now)
+    param($State, [string]$Boot, [bool]$ObsRunning, [datetime]$Now, [bool]$RestartRequested = $false)
 
     $s = New-State
     foreach ($k in @($s.Keys)) { $s[$k] = [string]$State[$k] }
+    if ($s.lastSeenBoot -ne $Boot) { $s.restarts = '' }   # the cap is per boot
 
     if ($ObsRunning) {
+        if ($RestartRequested) {
+            $n = 0; $null = [int]::TryParse($s.restarts, [ref]$n)
+            $s.lastSeenBoot = $Boot; $s.snoozeUntil = ''; $s.graceUntil = ''
+            if ($n -ge $MaxRestarts) { return @{ Action = 'restart-giveup'; State = $s } }
+            $s.restarts = [string]($n + 1)
+            return @{ Action = 'restart-obs'; State = $s }
+        }
         if ($s.lastSeenBoot -eq $Boot -and -not $s.snoozeUntil -and -not $s.graceUntil) {
             return @{ Action = 'none'; State = $s }
         }
@@ -240,7 +328,8 @@ function Invoke-Watchdog {
         $before = $raw.lastSeenBoot
         $state = Update-LegacyBoot $raw $boot
         $d = Get-WatchdogDecision -State $state -Boot $boot `
-                -ObsRunning (Test-ObsRunning) -Now (Get-Now)
+                -ObsRunning (Test-ObsRunning) -Now (Get-Now) `
+                -RestartRequested (Test-RestartRequested)
         if ($d.Action -in 'none', 'wait-snooze', 'wait-grace') {
             # A migrated legacy boot must still be written, or the VBS gate
             # never sees a match and starts PowerShell every minute.
@@ -278,6 +367,18 @@ function Invoke-Watchdog {
                 Write-Log 'watchdog' 'OBS running again: cleared pending toast'
             }
             'running-update' { }   # routine bookkeeping, not worth a log line
+            'restart-obs' {
+                $why = Get-Content $RequestFile -TotalCount 1 -ErrorAction SilentlyContinue
+                Stop-Obs
+                Start-Obs   # also clears the request file
+                Write-Log 'watchdog' "replay buffer could not start ($why): restarted OBS ($($d.State.restarts)/$MaxRestarts this boot)"
+            }
+            'restart-giveup' {
+                Clear-RestartRequest
+                Write-Log 'watchdog' "replay buffer still failing after $MaxRestarts OBS restarts this boot: gave up, notified user"
+                try { Show-Notice 'OBS replay buffer is NOT running' 'Restarting OBS did not fix it. Open OBS to see the error. Clips are not being saved.' }
+                catch { Write-Log 'watchdog' "NOTICE FAILED ($($_.Exception.Message))" }
+            }
         }
     }
 }

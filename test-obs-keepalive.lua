@@ -53,8 +53,17 @@ end
 local function tick(n) for _ = 1, n or 1 do clock = clock + 1; sample_tick() end end
 local function fresh()
     K.exiting, K.hold_until, K.next_try, K.delay, K.warned = false, 0, 0, 10, nil
+    K.fails, K.requested = 0, false
     active, available, starts, stops = true, true, 0, 0
+    os.remove(M.request_file)
     script_load(nil)   -- sets loaded_at = now
+end
+M.request_file = (os.getenv("TEMP") or ".") .. "\\obs-restart-request-test"
+os.remove(M.request_file)
+local function request_exists()
+    local fh = io.open(M.request_file, "r")
+    if fh then fh:close(); return true end
+    return false
 end
 
 -- 1) Startup grace: OBS itself starts the buffer ~1 s after load. Don't race it.
@@ -119,6 +128,42 @@ tick(1);  check("third retry at +20 s", starts, 3)
 obslua.obs_frontend_replay_buffer_start = function() starts = starts + 1; active = true end
 tick(40); check("start succeeds on the next scheduled retry", active, true)
 tick(1);  check("backoff resets once running is observed", K.delay, 10)
+check("2 failed starts: no restart request yet", request_exists(), false)
+
+-- 8b) Start can never succeed (2026-10-17: NVENC failed to load at launch,
+--     encoder missing). After 3 failed starts, ask the watchdog to restart OBS.
+fresh(); tick(20)
+obslua.obs_frontend_replay_buffer_start = function() starts = starts + 1 end  -- stays off
+active = false
+tick(1)                                          -- start #1
+tick(10)                                         -- start #2 (1 failed)
+tick(20)                                         -- start #3 (2 failed)
+check("after 2 failed starts: no request", request_exists(), false)
+tick(40)                                         -- start #4 (3 failed)
+check("after 3 failed starts: restart requested", request_exists(), true)
+os.remove(M.request_file)
+tick(300)
+check("request written only once per OBS run", request_exists(), false)
+check("keeps retrying meanwhile", starts >= 5, true)
+-- Recovers on its own (e.g. user fixed it): stale request is withdrawn.
+M.request_restart("test")
+obslua.obs_frontend_replay_buffer_start = function() starts = starts + 1; active = true end
+tick(300)
+check("buffer recovered", active, true)
+tick(1)
+check("recovery withdraws the restart request", request_exists(), false)
+check("recovery resets the failure count", K.fails, 0)
+
+-- 8c) A save flush is not a failure.
+fresh(); tick(20)
+for _ = 1, 5 do
+    on_event(obslua.OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED)
+    active = false
+    on_event(obslua.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED)
+    do_start(); tick(30)
+end
+check("5 saves: no failures counted", K.fails, 0)
+check("5 saves: no restart request", request_exists(), false)
 
 -- 9) A fault inside keep-alive must not break focus sampling.
 fresh(); tick(20)

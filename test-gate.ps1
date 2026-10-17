@@ -50,6 +50,13 @@ Case 'state file is a folder (unreadable)'            'DIR'                     
 Case 'duplicate field'                                ('{"lastSeenBoot":"' + $boot + '","lastSeenBoot":"' + $boot + '","snoozeUntil":"","graceUntil":""}') 'run'
 Case 'real state file written by Save-State'          'SAVESTATE'                       'skip'
 
+# Lua asked for an OBS restart: must run even in an otherwise steady state.
+$req = Join-Path $tmp 'obs-restart-request'
+'x' | Set-Content $req
+Case 'steady state BUT restart requested by Lua'      (J $boot '' '')                   'run'
+Remove-Item $req
+Case 'request withdrawn -> steady again'              (J $boot '' '')                   'skip'
+
 Remove-Item $tmp -Recurse -Force
 "`n$($script:pass) passed, $($script:fail) failed"
 if ($script:fail) { exit 1 }

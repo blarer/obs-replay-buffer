@@ -188,3 +188,8 @@ Reload the Lua after editing: OBS -> Tools -> Scripts -> `obs-replay-flush.lua` 
 - 2026-09-13 - setup reconstructed from disk after the original transcript was lost; a bug was found and fixed (Claude Code session `e629dab1`).
 - 2026-09-22 - read-only audit during the Fortnite optimization swarm (jcode session `lobster`, `session_lobster_1790116066588_e51eae6c58496e6a`).
 - 2026-09-24 - this document written so the setup is never only-in-a-transcript again.
+- 2026-09-24 - redesign: VBS gate, Lua keep-alive, crash-marker cleanup, no websocket (jcode session `orangutan`, `session_orangutan_1790259638502_5aa40afdf29546a7`).
+- 2026-10-17 - **fix: NVENC not ready at boot.** After a bluescreen reboot (BugCheck 0x3B), OBS launched while the NVIDIA driver was still settling. OBS logged `[NVENC] Test process failed` / `NVENC not supported` / `Encoder ID 'obs_nvenc_av1_tex' not found`, so the replay buffer could never start. The Lua keep-alive retried forever, but only a fresh OBS process re-checks NVENC. Fixes:
+  - `Start-Obs` runs `obs-nvenc-test.exe` (the same check OBS does) and waits up to 60 s for `nvenc_supported=true` before launching.
+  - After 3 failed buffer starts, the Lua writes `Scripts\obs-restart-request`. The gate sees it, and the watchdog restarts OBS (at most 2x per boot). If that still doesn't help, it shows a "replay buffer is NOT running" toast instead of looping.
+  - Log lines to look for: `waited N s for NVENC`, `replay buffer could not start (...): restarted OBS (1/2 this boot)`, `gave up, notified user`.

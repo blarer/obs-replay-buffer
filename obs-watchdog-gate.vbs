@@ -6,6 +6,8 @@
 '   1. obs64.exe is running
 '   2. the state file says this boot was already handled (lastSeenBoot matches)
 '   3. no toast is pending and no snooze is set (graceUntil and snoozeUntil empty)
+'   4. obs-replay-flush.lua has not asked for an OBS restart (no
+'      obs-restart-request file: replay buffer kept failing to start)
 ' In every other case, including ANY error here, it runs obs-replay-watchdog.ps1
 ' exactly as before (fail-open), so the gate can only save work, never skip it.
 '
@@ -14,16 +16,18 @@
 Option Explicit
 On Error Resume Next
 
-Dim fso, dir, stateFile, ps1, sh, testDir
+Dim fso, dir, stateFile, requestFile, ps1, sh, testDir
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
 dir = fso.GetParentFolderName(WScript.ScriptFullName)
 ps1 = dir & "\obs-replay-watchdog.ps1"
 stateFile = dir & "\obs-watchdog-state.json"
+requestFile = dir & "\obs-restart-request"
 ' Test hook (test-gate.ps1): read state from a temp dir, report instead of run.
 testDir = sh.ExpandEnvironmentStrings("%OBS_WATCHDOG_STATEDIR%")
 If testDir <> "%OBS_WATCHDOG_STATEDIR%" And testDir <> "" Then
     stateFile = testDir & "\obs-watchdog-state.json"
+    requestFile = testDir & "\obs-restart-request"
 End If
 
 ' Never call CanSkip inside an If: see the trap described below.
@@ -63,6 +67,11 @@ Function CanSkip()
     If Err.Number <> 0 Then Exit Function
     If n < 1 Then Exit Function
 
+    Dim req
+    req = True                                  ' error -> treat as present -> run
+    req = fso.FileExists(requestFile)
+    If Err.Number <> 0 Then Exit Function
+    If req = True Then Exit Function
     boot = ""
     For Each os In wmi.ExecQuery("SELECT LastBootUpTime FROM Win32_OperatingSystem")
         boot = os.LastBootUpTime

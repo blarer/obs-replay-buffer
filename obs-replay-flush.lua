@@ -228,13 +228,36 @@ local rec_start_t = nil
 -- A failing start (e.g. encoder error) makes OBS show an error dialog, so
 -- retries back off 10 s, 20 s, 40 s ... up to 5 min, and reset once the
 -- buffer is seen running again.
+--
+-- Some failures can't be fixed from inside OBS. On 2026-10-17 OBS launched
+-- while the NVIDIA driver was still settling after boot: "NVENC not
+-- supported", obs-nvenc.dll never loaded, the AV1 encoder didn't exist, and
+-- every start failed for good. Only a fresh OBS process fixes that. So after
+-- RESTART_AFTER failed starts this writes obs-restart-request next to the
+-- script, and the watchdog (Task Scheduler, every minute) restarts OBS.
 
 local STARTUP_GRACE = 15
 local FLUSH_HOLD = 5
 local RETRY_MIN, RETRY_MAX = 10, 300
+local RESTART_AFTER = 3         -- failed starts in a row -> ask for an OBS restart
 
-local K = { loaded_at = 0, hold_until = 0, next_try = 0, delay = RETRY_MIN, exiting = false }
+local K = { loaded_at = 0, hold_until = 0, next_try = 0, delay = RETRY_MIN,
+            exiting = false, fails = 0, requested = false }
 M.K = K
+M.request_file = nil            -- set in script_load (tests set it directly)
+
+function M.request_restart(reason)
+    if not M.request_file then return end
+    local fh = io.open(M.request_file, "w")
+    if not fh then print("keep-alive: could not write restart request"); return end
+    fh:write(os.date("%Y-%m-%d %H:%M:%S") .. " " .. reason .. "\n")
+    fh:close()
+    print("keep-alive: asked the watchdog to restart OBS (" .. reason .. ")")
+end
+
+local function clear_request()
+    if M.request_file then os.remove(M.request_file) end
+end
 
 local function buffer_available()
     local out = obs.obs_frontend_get_replay_buffer_output()
@@ -248,7 +271,8 @@ function M.keepalive()
     if K.exiting or now < K.loaded_at + STARTUP_GRACE then return end
 
     if obs.obs_frontend_replay_buffer_active() then
-        K.delay, K.next_try = RETRY_MIN, 0
+        K.delay, K.next_try, K.fails = RETRY_MIN, 0, 0
+        if K.requested then K.requested = false; clear_request() end
         return
     end
     if now < K.hold_until then return end
@@ -256,6 +280,13 @@ function M.keepalive()
     -- manual stop isn't mistaken for a flush.
     restarting = false
     if now < K.next_try or not buffer_available() then return end
+
+    -- Reaching here again means the previous start didn't stick.
+    if K.next_try > 0 then K.fails = K.fails + 1 end
+    if K.fails >= RESTART_AFTER and not K.requested then
+        K.requested = true
+        M.request_restart(K.fails .. " replay buffer starts failed")
+    end
 
     print("keep-alive: replay buffer was off, starting it")
     obs.obs_frontend_replay_buffer_start()
@@ -344,6 +375,9 @@ end
 function script_load(settings)
     obs.obs_frontend_add_event_callback(on_event)
     K.loaded_at = M.now()
+    if not M.request_file and script_path then
+        M.request_file = script_path() .. "obs-restart-request"
+    end
     obs.timer_add(sample_tick, SAMPLE_MS)
     sample_tick()
     print("replay-flush + smart game-sort loaded")
