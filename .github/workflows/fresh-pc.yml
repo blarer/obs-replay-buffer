@@ -108,11 +108,23 @@ jobs:
           "OK: clip sorted to " + $sorted[0].FullName
           Stop-Obs
 
-      - name: Unit tests (PowerShell suites; Lua suites need lua/luajit)
+      - name: Unit tests (all 7 suites)
         shell: pwsh
         run: |
-          choco install lua luajit --no-progress -y 2>&1 | Select-String -Pattern 'installed|already|fail' | ForEach-Object { $_.Line }
-          $env:PATH = "C:\ProgramData\chocolatey\bin;C:\ProgramData\chocolatey\lib\lua\tools;C:\ProgramData\chocolatey\lib\luajit\tools;$env:PATH"
+          # lua 5.x from chocolatey; luajit from the msys2 UCRT package (same
+          # source scoop uses), since chocolatey has no luajit package.
+          choco install lua --no-progress -y 2>&1 | Select-String -Pattern 'installed|already|fail' | ForEach-Object { $_.Line }
+          $idx = Invoke-WebRequest 'https://repo.msys2.org/mingw/ucrt64/' -UseBasicParsing
+          $pkg = ([regex]'mingw-w64-ucrt-x86_64-luajit-[^"]+\.zst').Matches($idx.Content) | Select-Object -Last 1 | ForEach-Object { $_.Value }
+          "luajit package: $pkg"
+          Invoke-WebRequest "https://repo.msys2.org/mingw/ucrt64/$pkg" -OutFile luajit.tar.zst
+          New-Item -ItemType Directory luajit-bin | Out-Null
+          tar -xf luajit.tar.zst -C luajit-bin
+          $lj = Get-ChildItem luajit-bin -Recurse -Filter luajit.exe | Select-Object -First 1
+          # luajit.exe needs lua51.dll + the ucrt libgcc beside it; the package has them in the same bin dir.
+          $env:PATH = "$($lj.DirectoryName);C:\ProgramData\chocolatey\bin;C:\ProgramData\chocolatey\lib\lua\tools;$env:PATH"
+          & luajit -v
+          & lua -v
           # test-gate.ps1 needs OBS running.
           . .\obs-watchdog-common.ps1; Start-Obs; Start-Sleep 15
           cmd /c run-tests.cmd

@@ -1,5 +1,7 @@
 # obs-replay-buffer
 
+[![fresh-pc](https://github.com/blarer/obs-replay-buffer/actions/workflows/fresh-pc.yml/badge.svg)](https://github.com/blarer/obs-replay-buffer/actions/workflows/fresh-pc.yml)
+
 Always-on OBS replay buffer for Windows. Press one key in any game and the last
 N seconds land in `Videos\<game>\`, sorted by the game that was actually on
 screen. OBS is kept open and the buffer kept running, through reboots and
@@ -7,6 +9,12 @@ crashes, by a tiny watchdog that costs about 30 ms of CPU per minute.
 
 Works on any Windows 10/11 PC with OBS Studio 28 or newer. No admin rights, no
 extra downloads, no OBS plugins.
+
+The badge above is a real end-to-end install on a brand-new Windows machine
+(GitHub's `windows-latest` runner, no GPU, nothing pre-installed): every push
+installs OBS from the official release, runs `setup.ps1`, launches OBS, saves
+a replay from inside OBS, checks that it was sorted into a subfolder, runs all
+test suites, and uninstalls cleanly.
 
 ## What you get
 
