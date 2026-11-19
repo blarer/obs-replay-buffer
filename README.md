@@ -10,6 +10,10 @@ crashes, by a tiny watchdog that costs about 30 ms of CPU per minute.
 Works on any Windows 10/11 PC with OBS Studio 28 or newer. No admin rights, no
 extra downloads, no OBS plugins.
 
+**Never used OBS or a terminal?** Follow
+[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md): click-by-click, no
+computer skills needed.
+
 The badge above is a real end-to-end install on a brand-new Windows machine
 (GitHub's `windows-latest` runner, no GPU, nothing pre-installed): every push
 installs OBS from the official release, runs `setup.ps1`, launches OBS, saves
