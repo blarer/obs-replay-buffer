@@ -1,0 +1,131 @@
+name: fresh-pc
+
+# Proves the install works on a Windows machine that has never seen this repo:
+# a clean GitHub-hosted windows-latest runner. Installs OBS from the official
+# release, runs setup.ps1 exactly like a user would, launches OBS, and checks
+# that the Lua script loaded, the replay buffer started, and a saved replay was
+# sorted into Videos\<folder>\.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  fresh-pc:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OBS Studio (official installer, silent)
+        shell: pwsh
+        run: |
+          $rel = Invoke-RestMethod https://api.github.com/repos/obsproject/obs-studio/releases/latest
+          $asset = $rel.assets | Where-Object name -match 'Windows-x64-Installer\.exe$' | Select-Object -First 1
+          "Installing $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile obs-setup.exe
+          Start-Process .\obs-setup.exe -ArgumentList '/S' -Wait
+          $exe = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
+          if (-not (Test-Path $exe)) { throw "OBS not installed at $exe" }
+          "OBS version: " + (Get-Item $exe).VersionInfo.ProductVersion
+
+      - name: First run of OBS (creates %APPDATA%\obs-studio like a real first launch)
+        shell: pwsh
+        run: |
+          # A GUI session exists on the runner, so OBS starts normally. The
+          # first-run wizard is skipped because we start minimized and kill it
+          # after the config files appear.
+          $exe = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
+          $p = Start-Process $exe -WorkingDirectory (Split-Path $exe) -ArgumentList '--minimize-to-tray','--disable-updater' -PassThru
+          $cfg = Join-Path $env:APPDATA 'obs-studio'
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Get-Date) -lt $deadline -and -not (Test-Path (Join-Path $cfg 'basic\scenes\*.json'))) { Start-Sleep 2 }
+          Start-Sleep 5
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Start-Sleep 3
+          "config tree after first run:"
+          Get-ChildItem $cfg -Recurse -File | ForEach-Object { "  " + $_.FullName.Substring($cfg.Length) }
+          if (-not (Test-Path (Join-Path $cfg 'basic\scenes\*.json'))) { throw 'OBS never wrote a scene collection' }
+
+      - name: Run setup.ps1 (what the user does)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -NoStart
+          if ($LASTEXITCODE -ne 0) { throw "setup.ps1 exited $LASTEXITCODE" }
+
+      - name: Status must be all-ok
+        shell: pwsh
+        run: |
+          $out = powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -Status 2>&1 | Out-String
+          $out
+          # Everything except "OBS is not running" and the OBS-log line (OBS not started yet) must be ok.
+          $bad = ($out -split "`n") | Where-Object { $_ -match '\[(warn|FAIL)\]' -and $_ -notmatch 'OBS is not running|does not show the Lua script loading' }
+          if ($bad) { throw "status not clean:`n$($bad -join "`n")" }
+
+      - name: Launch OBS, then save a replay from inside OBS and check it was sorted
+        shell: pwsh
+        run: |
+          . .\obs-watchdog-common.ps1
+          $cfg = Join-Path $env:APPDATA 'obs-studio'
+          $vid = [Environment]::GetFolderPath('MyVideos')
+          New-Item -ItemType Directory $vid -Force | Out-Null
+
+          # Second script that asks OBS to save a replay once the buffer is up.
+          $trig = Join-Path $env:TEMP 'ci-trigger.lua'
+          @(
+            'obs = obslua',
+            'local fired = false',
+            'function tick()',
+            '  if fired then return end',
+            '  if obs.obs_frontend_replay_buffer_active() then fired = true; obs.timer_remove(tick); print("CI: saving replay"); obs.obs_frontend_replay_buffer_save() end',
+            'end',
+            'function script_load(s) obs.timer_add(tick, 1000) end'
+          ) | Set-Content $trig
+          $scene = Get-ChildItem (Join-Path $cfg 'basic\scenes') -Filter *.json | Select-Object -First 1
+          $j = Get-Content $scene.FullName -Raw | ConvertFrom-Json
+          $j.modules.'scripts-tool' = @($j.modules.'scripts-tool') + @([pscustomobject]@{ path = ($trig -replace '\\','/'); settings = [pscustomobject]@{} })
+          [IO.File]::WriteAllText($scene.FullName, ($j | ConvertTo-Json -Depth 64), (New-Object Text.UTF8Encoding $false))
+
+          Start-Obs
+          Start-Sleep 60
+          $log = Get-ChildItem (Join-Path $cfg 'logs') -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          "---- OBS log ($($log.Name)) ----"
+          Get-Content $log.FullName
+          "---- Videos tree ----"
+          Get-ChildItem $vid -Recurse -File | ForEach-Object { "  " + $_.FullName + "  " + $_.Length }
+          "---- watchdog log ----"
+          Get-Content .\obs-watchdog.log -ErrorAction SilentlyContinue
+
+          $text = Get-Content $log.FullName -Raw
+          if ($text -notmatch 'Loaded lua script: obs-replay-flush\.lua') { throw 'Lua script did not load' }
+          if ($text -notmatch '==== Replay Buffer Start') { throw 'replay buffer did not start' }
+          if ($text -notmatch 'Wrote replay buffer to') { throw 'no replay was written' }
+          if ($text -notmatch 'sorted -> ') { throw 'replay was not sorted into a folder' }
+          $sorted = @(Get-ChildItem $vid -Recurse -File -Filter *.mp4 | Where-Object { $_.DirectoryName -ne $vid })
+          if (-not $sorted) { throw 'no clip found inside a Videos subfolder' }
+          "OK: clip sorted to " + $sorted[0].FullName
+          Stop-Obs
+
+      - name: Unit tests (PowerShell suites; Lua suites need lua/luajit)
+        shell: pwsh
+        run: |
+          choco install lua luajit --no-progress -y 2>&1 | Select-String -Pattern 'installed|already|fail' | ForEach-Object { $_.Line }
+          $env:PATH = "C:\ProgramData\chocolatey\bin;C:\ProgramData\chocolatey\lib\lua\tools;C:\ProgramData\chocolatey\lib\luajit\tools;$env:PATH"
+          # test-gate.ps1 needs OBS running.
+          . .\obs-watchdog-common.ps1; Start-Obs; Start-Sleep 15
+          cmd /c run-tests.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
+          Stop-Obs
+
+      - name: Uninstall leaves nothing behind
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -Uninstall
+          if (Get-ScheduledTask -TaskName 'OBS Replay Buffer Watchdog' -ErrorAction SilentlyContinue) { throw 'task still registered' }
+          if (Test-Path 'HKCU:\Software\Classes\obs-watchdog') { throw 'protocol still registered' }
+          $cfg = Join-Path $env:APPDATA 'obs-studio'
+          $raw = Get-ChildItem (Join-Path $cfg 'basic\scenes') -Filter *.json | ForEach-Object { Get-Content $_.FullName -Raw }
+          if ($raw -match 'obs-replay-flush') { throw 'script still registered in OBS' }
+          "OK: clean uninstall"
