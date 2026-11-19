@@ -45,6 +45,9 @@ Check 'existing hotkey line kept'                 ((Get-IniValue $ini 'Hotkeys' 
 Check 'missing key -> null'                       (Get-IniValue $ini 'Nope' 'Nope') ''
 Check 'RecRB only set once (no duplicates)'       @(Select-String -Path $ini -Pattern '^RecRB=' ).Count 2   # one per section
 Check 'file has no BOM'                           ([IO.File]::ReadAllBytes($ini)[0] -ne 0xEF) $true
+$iniText = [IO.File]::ReadAllText($ini)
+Check 'new key lands inside its section, not after the blank line' ($iniText -match '(?m)^RecRB=true\r?\nRecRBTime=20') $true
+Check 'new section is preceded by a blank line'   ($iniText -match '(?m)^\r?\n\[AdvOut\]') $true
 
 '--- scene collection JSON ---'
 $scene = Join-Path $tmp 'Untitled.json'
@@ -60,6 +63,7 @@ Check 'uses forward slashes like OBS'             (($j.modules.'scripts-tool' | 
 Check 'other module data preserved'               $j.modules.'output-timer'.x 1
 Check 'top-level fields preserved'                $j.version 2
 Check 'backup written'                            (Test-Path "$scene.pre-setup.bak") $true
+Check 'scene JSON has no BOM (OBS rejects it)'    ([IO.File]::ReadAllBytes($scene)[0] -eq 0x7B) $true
 Register-Lua $scene
 $j = Get-Content $scene -Raw | ConvertFrom-Json
 Check 'idempotent: still one entry'               @($j.modules.'scripts-tool' | Where-Object { $_.path -match 'obs-replay-flush' }).Count 1

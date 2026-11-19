@@ -32,6 +32,10 @@
 .PARAMETER ObsExe
   Full path to obs64.exe if auto-detection can't find it (portable installs).
 
+.PARAMETER ObsConfig
+  OBS config folder if it is not %APPDATA%\obs-studio (portable OBS keeps it
+  in <obs>\config\obs-studio).
+
 .PARAMETER NoStart
   Don't launch OBS at the end of install.
 
@@ -45,6 +49,7 @@ param(
     [switch]$Uninstall,
     [switch]$Status,
     [string]$ObsExe,
+    [string]$ObsConfig,
     [switch]$NoStart
 )
 $ErrorActionPreference = 'Stop'
@@ -57,7 +62,7 @@ $Gate     = Join-Path $Root 'obs-watchdog-gate.vbs'
 $Action   = Join-Path $Root 'obs-watchdog-action.ps1'
 $Hidden   = Join-Path $Root 'run-hidden.vbs'
 $Template = Join-Path $Root 'obs-watchdog-task.template.xml'
-$ObsCfg   = Join-Path $env:APPDATA 'obs-studio'
+$ObsCfg   = if ($ObsConfig) { $ObsConfig } elseif ($env:OBS_SETUP_CONFIG) { $env:OBS_SETUP_CONFIG } else { Join-Path $env:APPDATA 'obs-studio' }
 
 function Say($msg)  { Write-Host "  $msg" }
 function Ok($msg)   { Write-Host "  [ok]   $msg" -ForegroundColor Green }
@@ -105,14 +110,21 @@ function Get-ObsSceneCollectionFile {
     $null
 }
 
-# Minimal INI editing that keeps the file's other content untouched.
+# Minimal INI editing that keeps the file's other content untouched. New keys
+# go at the end of their section, before the blank line that precedes the
+# next header, so the file stays tidy.
 function Set-IniValue([string]$Path, [string]$Section, [string]$Key, [string]$Value) {
     $lines = @(Get-Content $Path -Encoding UTF8)
     $out = New-Object Collections.Generic.List[string]
     $inSection = $false; $done = $false; $sawSection = $false
     foreach ($line in $lines) {
         if ($line -match '^\[(.+)\]\s*$') {
-            if ($inSection -and -not $done) { $out.Add("$Key=$Value"); $done = $true }
+            if ($inSection -and -not $done) {
+                # Insert before trailing blank lines of the section we are leaving.
+                $i = $out.Count
+                while ($i -gt 0 -and $out[$i - 1] -eq '') { $i-- }
+                $out.Insert($i, "$Key=$Value"); $done = $true
+            }
             $inSection = ($Matches[1] -eq $Section)
             if ($inSection) { $sawSection = $true }
             $out.Add($line); continue
@@ -123,8 +135,15 @@ function Set-IniValue([string]$Path, [string]$Section, [string]$Key, [string]$Va
         $out.Add($line)
     }
     if (-not $done) {
-        if (-not $sawSection) { $out.Add("[$Section]") }
-        $out.Add("$Key=$Value")
+        if (-not $sawSection) {
+            if ($out.Count -gt 0 -and $out[$out.Count - 1] -ne '') { $out.Add('') }
+            $out.Add("[$Section]")
+        } else {
+            $i = $out.Count
+            while ($i -gt 0 -and $out[$i - 1] -eq '') { $i-- }
+            $out.Insert($i, "$Key=$Value"); $done = $true
+        }
+        if (-not $done) { $out.Add("$Key=$Value") }
     }
     [IO.File]::WriteAllLines($Path, $out, (New-Object Text.UTF8Encoding $false))
 }
@@ -142,6 +161,14 @@ function Test-LuaRegistered([string]$SceneFile) {
     if (-not $SceneFile -or -not (Test-Path $SceneFile)) { return $false }
     $raw = Get-Content $SceneFile -Raw
     $raw -match [regex]::Escape($LuaForObs) -or $raw -match [regex]::Escape($Lua)
+}
+
+# OBS reads its scene collection with a strict JSON parser: no BOM allowed.
+# Set-Content -Encoding UTF8 on Windows PowerShell 5.1 writes a BOM, so go
+# through .NET with an explicit BOM-less encoding.
+function Write-Json([string]$Path, $Object) {
+    $text = $Object | ConvertTo-Json -Depth 64
+    [IO.File]::WriteAllText($Path, $text, (New-Object Text.UTF8Encoding $false))
 }
 
 function Test-HasProp($obj, [string]$name) {
@@ -162,7 +189,7 @@ function Register-Lua([string]$SceneFile) {
     $list += [pscustomobject]@{ path = $LuaForObs; settings = [pscustomobject]@{} }
     $json.modules.'scripts-tool' = $list
     Copy-Item $SceneFile "$SceneFile.pre-setup.bak" -Force
-    $json | ConvertTo-Json -Depth 64 | Set-Content $SceneFile -Encoding UTF8
+    Write-Json $SceneFile $json
 }
 
 function Unregister-Lua([string]$SceneFile) {
@@ -171,7 +198,7 @@ function Unregister-Lua([string]$SceneFile) {
     if (-not (Test-HasProp $json 'modules')) { return }
     if (-not (Test-HasProp $json.modules 'scripts-tool')) { return }
     $json.modules.'scripts-tool' = @($json.modules.'scripts-tool' | Where-Object { $_.path -notmatch 'obs-replay-flush\.lua$' })
-    $json | ConvertTo-Json -Depth 64 | Set-Content $SceneFile -Encoding UTF8
+    Write-Json $SceneFile $json
 }
 
 # ------------------------------------------------------- protocol + task ---
