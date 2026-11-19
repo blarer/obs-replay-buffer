@@ -38,7 +38,7 @@ package.loaded.ffi = {
 }
 
 local dir = arg[0]:match("^(.*)[/\\][^/\\]+$") or "."
-assert(loadfile(dir .. "/obs-replay-flush.lua"))()
+assert(loadfile(dir .. "/../obs-replay-flush.lua"))()
 local M = OBS_CLIP_SORT
 M.now = function() return clock end
 M.foreground_info = function() return "FortniteClient-Win64-Shipping", 2.0 end

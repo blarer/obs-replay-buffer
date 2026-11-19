@@ -1,4 +1,23 @@
+# Runtime state written next to the scripts (machine specific, never commit)
 obs-watchdog-state.json
 obs-watchdog-state.json.tmp
 obs-watchdog.log
-obs-watchdog.log.1
+obs-watchdog.log.*
+obs-restart-request
+
+# Visual classifier scratch (tools/sort_clips.py and friends)
+clipsort-progress.log
+_thumbs.npz
+_sweep-sigs.json
+_verify/
+_verify_all/
+_montage/
+_*.png
+__pycache__/
+*.pyc
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

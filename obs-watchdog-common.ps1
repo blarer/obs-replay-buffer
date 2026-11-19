@@ -22,7 +22,30 @@ $StateFile   = Join-Path $WatchdogDir 'obs-watchdog-state.json'
 $LogFile     = Join-Path $WatchdogDir 'obs-watchdog.log'
 $RequestFile = Join-Path $WatchdogDir 'obs-restart-request'
 
-$ObsExe        = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
+# Where OBS lives. Checked in order: OBS_WATCHDOG_OBSEXE (explicit override),
+# the installer's registry key, then the usual install folders. Steam and
+# portable installs are covered by the override or the Steam path below.
+function Find-ObsExe {
+    if ($env:OBS_WATCHDOG_OBSEXE -and (Test-Path $env:OBS_WATCHDOG_OBSEXE)) { return $env:OBS_WATCHDOG_OBSEXE }
+    $candidates = @()
+    foreach ($key in 'HKLM:\SOFTWARE\OBS Studio', 'HKLM:\SOFTWARE\WOW6432Node\OBS Studio', 'HKCU:\SOFTWARE\OBS Studio') {
+        try {
+            $root = (Get-ItemProperty $key -ErrorAction Stop).'(default)'
+            if ($root) { $candidates += (Join-Path $root 'bin\64bit\obs64.exe') }
+        } catch {}
+    }
+    $candidates += @(
+        (Join-Path $env:ProgramFiles 'obs-studio\bin\64bit\obs64.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'obs-studio\bin\64bit\obs64.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Steam\steamapps\common\OBS Studio\bin\64bit\obs64.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\obs-studio\bin\64bit\obs64.exe')
+    )
+    foreach ($c in $candidates) { if ($c -and (Test-Path $c)) { return $c } }
+    # Last resort: the default path, so error messages at least name it.
+    Join-Path $env:ProgramFiles 'obs-studio\bin\64bit\obs64.exe'
+}
+
+$ObsExe        = Find-ObsExe
 $ObsDir        = Split-Path $ObsExe
 $NvencTest     = Join-Path $ObsDir 'obs-nvenc-test.exe'
 $GraceMinutes  = 5
@@ -57,9 +80,16 @@ function Wait-Seconds([int]$n) { Start-Sleep -Seconds $n }
 
 # OBS checks NVENC once, at startup, by running obs-nvenc-test.exe. If that
 # fails (driver still settling after boot) NVENC stays off until OBS restarts,
-# and the AV1 replay buffer can never start. Run the same test first.
+# and an NVENC replay buffer can never start. Run the same test first.
+# Only meaningful on machines with an NVIDIA GPU; everyone else skips it.
+function Test-HasNvidiaGpu {
+    try { [bool](Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match 'NVIDIA' }) }
+    catch { $false }
+}
+
 function Test-NvencReady {
     if (-not (Test-Path $NvencTest)) { return $true }   # can't check: don't block
+    if (-not (Test-HasNvidiaGpu)) { return $true }      # nothing to wait for
     try {
         $psi = New-Object Diagnostics.ProcessStartInfo $NvencTest
         $psi.UseShellExecute = $false
@@ -83,12 +113,16 @@ function Wait-NvencReady {
 }
 
 # Polite close first (lets OBS save and remove its crash marker), then force.
+# taskkill writes to stderr when OBS ignores WM_CLOSE (minimized to tray, or
+# its "confirm exit" dialog is up); under $ErrorActionPreference='Stop' that
+# would throw, so run it through cmd and swallow everything.
 function Stop-Obs {
     $p = @(Get-Process obs64 -ErrorAction SilentlyContinue)
     if (-not $p) { return }
-    & taskkill.exe /im obs64.exe *> $null
+    try { & cmd.exe /d /c 'taskkill.exe /im obs64.exe >nul 2>&1' } catch {}
     try { $p | Wait-Process -Timeout 15 -ErrorAction Stop }
-    catch { Get-Process obs64 -ErrorAction SilentlyContinue | Stop-Process -Force }
+    catch { Get-Process obs64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }
+    try { Get-Process obs64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue } catch {}
     Start-Sleep -Seconds 2
 }
 

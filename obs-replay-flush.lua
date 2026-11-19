@@ -133,12 +133,35 @@ if obs then
     HANDLE OpenProcess(DWORD dwDesiredAccess, int bInheritHandle, DWORD dwProcessId);
     int QueryFullProcessImageNameA(HANDLE hProcess, DWORD dwFlags, char* lpExeName, DWORD* lpdwSize);
     int CloseHandle(HANDLE hObject);
-    int CreateDirectoryA(const char* lpPathName, void* lpSecurityAttributes);
     int GetWindowRect(HWND hWnd, RECT* lpRect);
     int GetSystemMetrics(int nIndex);
+    int MultiByteToWideChar(unsigned int cp, DWORD flags, const char* src, int srclen, wchar_t* dst, int dstlen);
+    int CreateDirectoryW(const wchar_t* path, void* sa);
+    int MoveFileExW(const wchar_t* src, const wchar_t* dst, DWORD flags);
+    DWORD GetFileAttributesW(const wchar_t* path);
+    DWORD GetLastError();
     ]]
     user32   = ffi.load("user32")
     kernel32 = ffi.load("kernel32")
+
+    -- OBS hands us UTF-8 paths. The ANSI file APIs (and Lua's os.rename)
+    -- mangle anything outside the system code page, so a user called Jos\u00e9
+    -- would get "move failed". Convert to UTF-16 and use the W APIs.
+    local function wide(s)
+        local n = kernel32.MultiByteToWideChar(65001, 0, s, #s, nil, 0)
+        local buf = ffi.new("wchar_t[?]", n + 1)
+        kernel32.MultiByteToWideChar(65001, 0, s, #s, buf, n)
+        buf[n] = 0
+        return buf
+    end
+    M.win = {
+        exists = function(p) return kernel32.GetFileAttributesW(wide(p)) ~= 0xFFFFFFFF end,
+        mkdir  = function(p) kernel32.CreateDirectoryW(wide(p), nil) end,
+        move   = function(src, dst)
+            if kernel32.MoveFileExW(wide(src), wide(dst), 0) ~= 0 then return true end
+            return nil, "win32 error " .. tonumber(kernel32.GetLastError())
+        end,
+    }
 
     -- Resolving a PID to an exe name costs ~33 us and is the only expensive
     -- part, so cache it per HWND: while you sit in one game every sample is a
@@ -316,21 +339,24 @@ M.move_to_folder = function(path, folder)
     local dir, file = path:match("^(.*)[/\\]([^/\\]+)$")
     if not dir then return end
     local target = dir .. "\\" .. folder
-    kernel32.CreateDirectoryA(target, nil)   -- no-op if it exists
-    -- os.rename fails if the destination exists (two saves with the same
+    -- Plain-Lua fallback (tests without ffi): ANSI-only, fine for ASCII paths.
+    local win = M.win or {
+        exists = function(p) local fh = io.open(p, "rb"); if fh then fh:close(); return true end return false end,
+        mkdir  = function(p) os.execute('mkdir "' .. p .. '" >nul 2>&1') end,
+        move   = os.rename,
+    }
+    win.mkdir(target)   -- no-op if it exists
+    -- A move fails if the destination exists (two saves with the same
     -- timestamp-derived name), which used to strand the clip in Videos\.
     -- Pick a free name instead: "clip (2).mp4", "clip (3).mp4", ...
     local stem, ext = file:match("^(.*)(%.[^.]+)$")
     if not stem then stem, ext = file, "" end
     local name, n = file, 1
-    while true do
-        local fh = io.open(target .. "\\" .. name, "rb")
-        if not fh then break end
-        fh:close()
+    while win.exists(target .. "\\" .. name) do
         n = n + 1
         name = stem .. " (" .. n .. ")" .. ext
     end
-    local ok, err = os.rename(path, target .. "\\" .. name)
+    local ok, err = win.move(path, target .. "\\" .. name)
     if ok then
         print("sorted -> " .. folder .. "\\" .. name)
     else

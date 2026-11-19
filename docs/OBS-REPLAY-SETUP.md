@@ -12,12 +12,12 @@ Goal: the replay buffer is **always running** so a clip is never missed, and sav
 
 | File / object | Role |
 |---|---|
-| `C:\Users\blare\Scripts\obs-replay-watchdog.ps1` | Main watchdog. Launches OBS, or ensures the replay buffer is on via obs-websocket. |
-| `C:\Users\blare\Scripts\obs-watchdog-action.ps1` | Handles toast button clicks (`obs-watchdog:` protocol). |
-| `C:\Users\blare\Scripts\obs-watchdog-state.json` | Persisted state: `lastSeenBoot`, `snoozeUntil`, `graceUntil`. |
-| `C:\Users\blare\Scripts\run-hidden.vbs` | Generic "run a .ps1 with zero window flash" shim (`sh.Run cmd, 0, False`). |
-| `C:\Users\blare\Scripts\obs-replay-flush.lua` | OBS script: flushes the buffer after each save, sorts clips per game. |
-| `C:\Users\blare\Scripts\test-obs-sort.lua`, `test-obs-win32.lua` | Test harness for the pure scoring half, runs under plain Lua with no OBS. |
+| `C:\Users\<you>\obs-replay-buffer\obs-replay-watchdog.ps1` | Main watchdog. Launches OBS, or ensures the replay buffer is on via obs-websocket. |
+| `C:\Users\<you>\obs-replay-buffer\obs-watchdog-action.ps1` | Handles toast button clicks (`obs-watchdog:` protocol). |
+| `C:\Users\<you>\obs-replay-buffer\obs-watchdog-state.json` | Persisted state: `lastSeenBoot`, `snoozeUntil`, `graceUntil`. |
+| `C:\Users\<you>\obs-replay-buffer\run-hidden.vbs` | Generic "run a .ps1 with zero window flash" shim (`sh.Run cmd, 0, False`). |
+| `C:\Users\<you>\obs-replay-buffer\obs-replay-flush.lua` | OBS script: flushes the buffer after each save, sorts clips per game. |
+| `C:\Users\<you>\obs-replay-buffer\test-obs-sort.lua`, `test-obs-win32.lua` | Test harness for the pure scoring half, runs under plain Lua with no OBS. |
 | Scheduled task `\OBS Replay Buffer Watchdog` | Runs the watchdog. |
 | `HKCR\obs-watchdog` | URL protocol backing the toast buttons. |
 | OBS profile `GameRec-AV1` (**live dir is `GameRecAV1`**) | Recording / replay-buffer settings. |
@@ -30,10 +30,10 @@ Goal: the replay buffer is **always running** so a clip is never missed, and sav
 Name: `\OBS Replay Buffer Watchdog`
 
 ```
-Action:   wscript.exe "C:\Users\blare\Scripts\run-hidden.vbs" "C:\Users\blare\Scripts\obs-replay-watchdog.ps1"
-Triggers: LogonTrigger (blare), 30s delay
+Action:   wscript.exe "C:\Users\<you>\obs-replay-buffer\run-hidden.vbs" "C:\Users\<you>\obs-replay-buffer\obs-replay-watchdog.ps1"
+Triggers: LogonTrigger (<you>), 30s delay
           TimeTrigger from 2026-07-04, repeat every 1 minute for 3650 days
-Principal: blare, InteractiveToken (NOT highest privileges - needed so toasts show)
+Principal: <you>, InteractiveToken (NOT highest privileges - needed so toasts show)
 Settings:  ExecutionTimeLimit PT3M, MultipleInstancesPolicy IgnoreNew,
            StartWhenAvailable true, battery restrictions disabled
 ```
@@ -47,7 +47,7 @@ HKCR\obs-watchdog
   (Default)    = "URL:OBS Watchdog Protocol"
   URL Protocol = ""
   shell\open\command =
-    wscript.exe "C:\Users\blare\Scripts\run-hidden.vbs" "C:\Users\blare\Scripts\obs-watchdog-action.ps1" "%1"
+    wscript.exe "C:\Users\<you>\obs-replay-buffer\run-hidden.vbs" "C:\Users\<you>\obs-replay-buffer\obs-watchdog-action.ps1" "%1"
 ```
 
 URIs: `obs-watchdog:relaunch`, `obs-watchdog:snooze`.
@@ -125,7 +125,7 @@ Encoder settings: CQP 20, preset2 p7 (+ legacy "preset":"p5" key), tune hq,
                   lookahead off, AQ on
                   (from GameRecAV1\recordEncoder.json, last changed 2026-09-22)
 Container:        hybrid_mp4
-Path:             C:\Users\blare\Videos
+Path:             C:\Users\<you>\Videos
 Replay buffer:    RecRB=true, RecRBTime=600 (10 min), RecRBSize=4096 MB, prefix "rb"
 Audio:            ffmpeg_aac, 48 kHz stereo, 3 record tracks
 Save hotkey:      Alt+Z  (ReplayBuffer.Save)
@@ -143,7 +143,7 @@ Every item below was observed, not inferred:
 - `obs64` PID 2384, started 08:58, about 7 min after the 08:51 boot -> the logon-trigger silent launch path works.
 - `obs-watchdog-state.json` `lastSeenBoot` exactly matches `Win32_OperatingSystem.LastBootUpTime`, snooze and grace both empty -> normal steady state.
 - obs-websocket config: `server_enabled true`, `auth_required true`, `server_port 4455` -> matches what the watchdog assumes.
-- Scene collection `Untitled.json` loads exactly one script: `C:/Users/blare/Scripts/obs-replay-flush.lua`.
+- Scene collection `Untitled.json` loads exactly one script: `C:/Users/<you>/obs-replay-buffer/obs-replay-flush.lua`.
 - Sorting demonstrably works: `Videos\FortniteClient-Win64-Shipping\` holds recent clips (`rb Sep 23 10.08 PM.mp4`), while only one stray `rb Sep 21 09.14 PM.mp4` sits unsorted in `Videos\` root.
 - Folders are named by **executable**, so Fortnite lands in `FortniteClient-Win64-Shipping`, not a pretty title. `Videos\Captures` is an empty Windows default, unrelated.
 - Some clips carry a `_trim_198-599` suffix, from the separate `mp4trim` project, not from this setup.
@@ -171,7 +171,7 @@ Disable-ScheduledTask "OBS Replay Buffer Watchdog"
 Enable-ScheduledTask  "OBS Replay Buffer Watchdog"
 
 # state
-Get-Content C:\Users\blare\Scripts\obs-watchdog-state.json
+Get-Content C:\Users\<you>\obs-replay-buffer\obs-watchdog-state.json
 
 # full task definition
 schtasks /query /tn "OBS Replay Buffer Watchdog" /xml ONE

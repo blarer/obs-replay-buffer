@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +30,25 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-VIDEOS = Path(r"C:\Users\blare\Videos")
+
+def _videos_dir() -> Path:
+    """OBS_VIDEOS env var, else the user's real Videos folder (handles redirected
+    known folders), else ~/Videos."""
+    if os.environ.get("OBS_VIDEOS"):
+        return Path(os.environ["OBS_VIDEOS"])
+    try:
+        import ctypes
+        from ctypes import wintypes
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        # CSIDL_MYVIDEO = 14
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 14, None, 0, buf) == 0 and buf.value:
+            return Path(buf.value)
+    except Exception:
+        pass
+    return Path.home() / "Videos"
+
+
+VIDEOS = _videos_dir()
 CACHE = VIDEOS / ".clipsort-cache.json"
 PROGRESS = Path(__file__).with_name("clipsort-progress.log")
 

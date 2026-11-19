@@ -5,7 +5,7 @@
 # launching anything. Real obs64 presence and real boot time are used, so run
 # this while OBS is open.
 $ErrorActionPreference = 'Stop'
-$gate = Join-Path $PSScriptRoot 'obs-watchdog-gate.vbs'
+$gate = Join-Path $PSScriptRoot '..\obs-watchdog-gate.vbs'
 $tmp  = Join-Path $env:TEMP ("obs-gate-test-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $tmp | Out-Null
 $state = Join-Path $tmp 'obs-watchdog-state.json'
@@ -26,7 +26,7 @@ function Case($name, $content, $expect) {
     elseif ($content -eq 'SAVESTATE') {
         # Write it exactly the way the watchdog does, to prove the two agree.
         $env:OBS_WATCHDOG_STATEDIR = $tmp
-        powershell -NoProfile -Command ". '$PSScriptRoot\obs-watchdog-common.ps1'; `$s = New-State; `$s.lastSeenBoot = '$boot'; Save-State `$s"
+        powershell -NoProfile -Command ". '$PSScriptRoot\..\obs-watchdog-common.ps1'; `$s = New-State; `$s.lastSeenBoot = '$boot'; Save-State `$s"
         Remove-Item Env:\OBS_WATCHDOG_STATEDIR
     }
     elseif ($null -ne $content) { [IO.File]::WriteAllText($state, $content) }

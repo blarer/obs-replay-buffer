@@ -18,7 +18,7 @@ There are **two independent systems**:
 
 ### Where files land
 
-- OBS saves replays into `C:\Users\blare\Videos\` as `rb <Mon> <DD> <HH>.<MM> <AM/PM>.mp4`. The `rb` prefix comes from `RecRBPrefix`, the rest from `FilenameFormatting=%b %d %I.%M %p`.
+- OBS saves replays into `C:\Users\<you>\Videos\` as `rb <Mon> <DD> <HH>.<MM> <AM/PM>.mp4`. The `rb` prefix comes from `RecRBPrefix`, the rest from `FilenameFormatting=%b %d %I.%M %p`.
 - The Lua script then **moves** the file to `Videos\<folder>\<same filename>`. It creates the folder if it doesn't exist (`CreateDirectoryA`, a no-op if it's already there).
 - It sorts manual recordings too (`RECORDING_STOPPED`), not just replays.
 
@@ -82,7 +82,7 @@ Measured on your machine with `bench-focus-probe.cs` and the Lua timing tests:
 ### Tests
 
 ```
-cd C:\Users\blare\Scripts
+cd C:\Users\<you>\obs-replay-buffer
 lua    test-obs-sort.lua       # 19 scoring cases, no OBS needed      -> 19 passed (run 2026-09-24)
 luajit test-obs-win32.lua      # real win32 probe + stubbed OBS API   -> 7 passed  (run 2026-09-24)
 luajit test-obs-collision.lua  # same-name saves get (2), (3)         -> 4 passed  (run 2026-09-24)
@@ -143,7 +143,7 @@ A visual review of the dry run caught 3 wrong calls, all at ≤79% confidence (D
 
 The Aug 5-6 session ends **in the middle of the visual review** (montage page 5), and there's no record of `apply` being run. The `D:\PreReset-Backup\Videos` snapshot from Sep 20 still has **29 files in `Desktop`**, 3 in `Discord`, 1 in `Notepad`, and 1 in `ApplicationFrameHost`. So assume the old misfiled clips were **never moved**. If you want them sorted, run `plan`, review, then `apply`, against wherever those clips live now.
 
-Current state: `C:\Users\blare\Videos` only has `FortniteClient-Win64-Shipping\`, an empty `Captures\`, and one unsorted clip. The older per-game folders (eldenring, SonsOfTheForest, Desktop, etc.) exist only in `D:\PreReset-Backup\Videos`. System B's reference folders point at `C:\Users\blare\Videos`, so it **won't find its training data** until those folders are copied back or `VIDEOS` in `sort_clips.py` is pointed at the backup.
+Current state: `C:\Users\<you>\Videos` only has `FortniteClient-Win64-Shipping\`, an empty `Captures\`, and one unsorted clip. The older per-game folders (eldenring, SonsOfTheForest, Desktop, etc.) exist only in `D:\PreReset-Backup\Videos`. System B's reference folders point at `C:\Users\<you>\Videos`, so it **won't find its training data** until those folders are copied back or `VIDEOS` in `sort_clips.py` is pointed at the backup.
 
 ---
 

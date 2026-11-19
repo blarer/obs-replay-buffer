@@ -1,6 +1,8 @@
 # Rebuild Guide: Always-On OBS Replay Buffer, Close Notification, Clip Sorting
 
-Written 2026-09-24 for an AI (or human) with **no memory** of the original work. Follow it top to bottom on a fresh Windows 11 PC and you get the exact same setup. Every value was read off the working machine, not guessed. The full source of every file is in the **Appendix**, so this file alone is enough even if `C:\Users\blare\Scripts` is gone.
+> **Superseded.** `setup.ps1` in the repo root does all of this automatically. This document is kept for the reasoning behind each piece and as a manual fallback. Paths below use the original layout; in the repo, tests live in `tests/` and the classifier in `tools/`.
+
+Written 2026-09-24 for an AI (or human) with **no memory** of the original work. Follow it top to bottom on a fresh Windows 11 PC and you get the exact same setup. Every value was read off the working machine, not guessed. The full source of every file is in the **Appendix**, so this file alone is enough even if `C:\Users\<you>\obs-replay-buffer` is gone.
 
 A picture of the whole flow: `OBS-flow.png` (source `OBS-flow.mmd`, render command in section 6).
 
@@ -53,7 +55,7 @@ Why it is built this way:
 
 ## 2. Step by step build
 
-User on the original machine: `blare`. Scripts live in `C:\Users\<user>\Scripts\`.
+User on the original machine: `<you>`. Scripts live in the cloned repo folder, e.g. `C:\Users\<you>\obs-replay-buffer\`.
 
 ### Step 1. Install OBS
 OBS Studio 32.x (original: 32.2.0) at `C:\Program Files\obs-studio\`. Run it once normally so `%APPDATA%\obs-studio\` exists. Do **not** set it to run as administrator (section 3).
@@ -1505,8 +1507,8 @@ obslua = {
     obs_frontend_replay_buffer_stop = function() end,
     obs_frontend_replay_buffer_active = function() return true end,
     obs_frontend_get_replay_buffer_output = function() return nil end,   -- forces the default length
-    obs_frontend_get_last_replay = function() return "C:\\Users\\blare\\Videos\\clip.mp4" end,
-    obs_frontend_get_last_recording = function() return "C:\\Users\\blare\\Videos\\rec.mp4" end,
+    obs_frontend_get_last_replay = function() return "C:\\Users\\someone\\Videos\\clip.mp4" end,
+    obs_frontend_get_last_recording = function() return "C:\\Users\\someone\\Videos\\rec.mp4" end,
 }
 
 local dir = arg[0]:match("^(.*)[/\\][^/\\]+$") or "."

@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $tmp = Join-Path $env:TEMP ("obs-watchdog-test-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $tmp | Out-Null
 $env:OBS_WATCHDOG_STATEDIR = $tmp
-. (Join-Path $PSScriptRoot 'obs-watchdog-common.ps1')
+. (Join-Path $PSScriptRoot '..\obs-watchdog-common.ps1')
 
 $script:pass = 0; $script:fail = 0
 function Check($name, $got, $expect) {
@@ -171,6 +171,7 @@ Invoke-Watchdog
 Check 'after giving up: quiet again'                 "$($script:stops)/$($script:notices)" '2/1'
 
 '--- NVENC readiness wait ---'
+$origNvencReady = ${function:Test-NvencReady}
 $script:waits = 0; $script:nvencOkAfter = 2; $script:nvencCalls = 0
 function Test-NvencReady { $script:nvencCalls++; $script:nvencCalls -gt $script:nvencOkAfter }
 function Wait-Seconds([int]$n) { $script:waits += $n }
@@ -180,6 +181,23 @@ Check 'NVENC ready at once -> no wait'               (Wait-NvencReady) 0
 $script:nvencCalls = 0; $script:nvencOkAfter = 1000; $script:waits = 0
 Check 'NVENC never ready -> -1 (launch anyway)'      (Wait-NvencReady) -1
 Check 'NVENC never ready -> bounded wait'            $script:waits $NvencWaitSec
+
+'--- portability: OBS location + GPU gate ---'
+# Restore the real Test-NvencReady, then prove it does not block without an NVIDIA GPU.
+Set-Item Function:\Test-NvencReady $origNvencReady
+function Test-HasNvidiaGpu { $false }
+$NvencTest = Join-Path $tmp 'obs-nvenc-test.exe'; 'x' | Set-Content $NvencTest
+Check 'no NVIDIA GPU -> NVENC check passes at once'   (Test-NvencReady) $true
+Check 'no nvenc test exe -> passes'                   ($(
+        $NvencTest = Join-Path $tmp 'missing.exe'; Test-NvencReady)) $true
+$fake = Join-Path $tmp 'fake-obs\bin\64bit'; New-Item -ItemType Directory $fake | Out-Null
+$fakeExe = Join-Path $fake 'obs64.exe'; 'x' | Set-Content $fakeExe
+$env:OBS_WATCHDOG_OBSEXE = $fakeExe
+Check 'OBS_WATCHDOG_OBSEXE override wins'             (Find-ObsExe) $fakeExe
+$env:OBS_WATCHDOG_OBSEXE = Join-Path $tmp 'nope.exe'
+Check 'bad override is ignored'                       ((Find-ObsExe) -ne (Join-Path $tmp 'nope.exe')) $true
+Check 'detection always returns an obs64.exe path'    ((Find-ObsExe) -like '*\obs64.exe') $true
+Remove-Item Env:\OBS_WATCHDOG_OBSEXE
 
 Remove-Item $tmp -Recurse -Force
 Remove-Item Env:\OBS_WATCHDOG_STATEDIR

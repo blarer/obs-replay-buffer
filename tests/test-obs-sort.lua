@@ -2,7 +2,7 @@
 -- No OBS required: the script skips the win32 layer when `obslua` is absent.
 
 local dir = arg[0]:match("^(.*)[/\\][^/\\]+$") or "."
-assert(loadfile(dir .. "/obs-replay-flush.lua"))()
+assert(loadfile(dir .. "/../obs-replay-flush.lua"))()
 local M = OBS_CLIP_SORT
 
 -- Virtual clock + fake foreground window.
